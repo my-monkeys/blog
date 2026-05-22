@@ -142,3 +142,59 @@ button {
   line-height: 1.05;
   letter-spacing: -0.02em;
 }
+
+/* Image lightbox (cf. src/scripts/image-lightbox.ts) */
+.image-dialog {
+  width: min(96vw, 1600px);
+  max-width: 96vw;
+  height: 92vh;
+  max-height: 92vh;
+  padding: 0;
+  border: 3px solid var(--ink);
+  background: var(--bg);
+  color: var(--ink);
+  box-shadow: var(--shadow-hard);
+  position: relative;
+}
+.image-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.85);
+}
+.image-dialog-content {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 1.5rem;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.image-dialog-content img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+.image-dialog-close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 44px;
+  height: 44px;
+  font-size: 1.75rem;
+  font-family: var(--font-display);
+  line-height: 1;
+  background: var(--bg);
+  color: var(--ink);
+  border: 0;
+  border-left: 2px solid var(--ink);
+  border-bottom: 2px solid var(--ink);
+  cursor: pointer;
+  z-index: 2;
+}
+.image-dialog-close:hover {
+  background: var(--ink);
+  color: var(--bg);
+}

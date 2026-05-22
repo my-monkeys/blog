@@ -304,6 +304,20 @@ cover: ./_assets/cover-de-mon-article.jpg
 
 Le post apparaît alors comme **carte large avec image full-bleed** dans le feed (1 entrée sur 4 par défaut, voir `src/pages/index.astro`).
 
+#### Lightbox automatique
+
+Toutes les images dans une page post (cover + inline body) sont **cliquables pour s'agrandir** par défaut. Le script `src/scripts/image-lightbox.ts` :
+
+- Ajoute un `cursor: zoom-in` sur les images
+- Au clic → ouvre un `<dialog>` natif fullscreen (ESC ou clic-backdrop pour fermer)
+- Récupère la variante la plus haute résolution depuis le `srcset` généré par Astro Image
+
+Pour **désactiver** sur une image spécifique, ajouter l'attribut `data-no-zoom` :
+
+```mdx
+<img src="/icon.svg" alt="" data-no-zoom />
+```
+
 ### 6. Code dans un article
 
 Triple backtick + langue → highlight automatique via `astro-expressive-code` (theme dual light/dark, copy-button au hover, bordure 2px) :
