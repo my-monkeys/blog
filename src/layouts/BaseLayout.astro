@@ -39,6 +39,9 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="alternate" type="application/rss+xml" title="Blog My-Monkey" href="/rss.xml" />
     <ClientRouter />
+    <script>
+      import '@/scripts/animations.ts';
+    </script>
   </head>
   <body>
     <header class="page nav">
