@@ -1,0 +1,72 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import { Image } from 'astro:assets';
+import TypeBadge from './TypeBadge.astro';
+import ProjectBadge from './ProjectBadge.astro';
+import { readingTimeMinutes } from '@/lib/readingTime.js';
+
+export interface Props {
+  post: CollectionEntry<'posts'>;
+}
+const { post } = Astro.props;
+const d = post.data;
+const minutes = readingTimeMinutes(post.body);
+const date = d.date.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }).toUpperCase();
+const href = d.type === 'link' ? d.url! : `/posts/${post.slug}`;
+---
+
+<article class="featured">
+  {d.cover && (
+    <a href={href} class="featured-cover">
+      <Image src={d.cover} alt="" widths={[400, 800, 1200]} sizes="100vw" />
+    </a>
+  )}
+  <div class="featured-body">
+    <div class="featured-meta">
+      <span class="meta">{date}</span>
+      <TypeBadge type={d.type} />
+      {d.project && <ProjectBadge slug={d.project} />}
+    </div>
+    <a href={href} class="featured-title">{d.title}</a>
+    {d.excerpt && <p class="featured-excerpt">{d.excerpt}</p>}
+    <a href={href} class="featured-read">Lire — {minutes} min →</a>
+  </div>
+</article>
+
+<style>
+  .featured {
+    margin: 3rem 0;
+    border: 3px solid var(--ink);
+    box-shadow: var(--shadow-hard);
+    background: var(--bg-elev);
+  }
+  .featured-cover img { width: 100%; height: auto; display: block; border-bottom: 3px solid var(--ink); }
+  .featured-body { padding: 1.75rem; }
+  .featured-meta { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+  .featured-title {
+    display: block;
+    margin-top: 0.75rem;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(1.75rem, 4vw, 2.75rem);
+    line-height: 1.1;
+  }
+  .featured-title:hover { color: var(--accent); }
+  .featured-excerpt {
+    font-family: var(--font-body);
+    font-size: 1.0625rem;
+    color: var(--ink-soft);
+    margin-top: 0.75rem;
+    max-width: 65ch;
+  }
+  .featured-read {
+    display: inline-block;
+    margin-top: 1.25rem;
+    font-family: var(--font-ui);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-size: 0.875rem;
+    color: var(--accent);
+  }
+</style>

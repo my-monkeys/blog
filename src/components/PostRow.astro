@@ -1,0 +1,107 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import TypeBadge from './TypeBadge.astro';
+import ProjectBadge from './ProjectBadge.astro';
+import { readingTimeMinutes } from '@/lib/readingTime.js';
+
+export interface Props {
+  post: CollectionEntry<'posts'>;
+}
+const { post } = Astro.props;
+const d = post.data;
+const date = d.date.toLocaleDateString('en-US', { month: 'short', day: '2-digit' }).toUpperCase();
+const year = d.date.getFullYear();
+const minutes = readingTimeMinutes(post.body);
+
+const href = d.type === 'link' ? d.url! : `/posts/${post.slug}`;
+const external = d.type === 'link';
+
+// extract version from filename for type=update (manabo-v1-0-0 -> v1.0.0)
+let version: string | undefined;
+if (d.type === 'update') {
+  const m = post.slug.match(/-v(\d+)-(\d+)-(\d+)/);
+  if (m) version = `v${m[1]}.${m[2]}.${m[3]}`;
+}
+---
+
+<article class="row">
+  <div class="row-date">
+    <div class="row-date-md">{date}</div>
+    <div class="row-date-y">{year}</div>
+  </div>
+  <div class="row-main">
+    <a href={href} class="row-title" rel={external ? 'external noopener' : undefined}>
+      {d.title}
+      {external && <span class="row-ext">↗</span>}
+    </a>
+    {d.excerpt && <p class="row-excerpt">{d.excerpt}</p>}
+    <div class="row-meta">
+      <TypeBadge type={d.type} version={version} />
+      {d.project && <ProjectBadge slug={d.project} />}
+      {!external && <span class="row-readtime">{minutes} min</span>}
+    </div>
+  </div>
+  {!external && <a href={href} class="row-arrow" aria-hidden="true">→</a>}
+</article>
+
+<style>
+  .row {
+    display: grid;
+    grid-template-columns: 5rem 1fr auto;
+    gap: 2rem;
+    padding: 2rem 0;
+    border-bottom: 1px solid var(--ink);
+    align-items: start;
+  }
+  .row-date {
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    text-align: left;
+  }
+  .row-date-md { font-weight: 600; }
+  .row-date-y { opacity: 0.7; }
+  .row-title {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(1.25rem, 2.2vw, 1.75rem);
+    line-height: 1.2;
+    display: inline-block;
+  }
+  .row-title:hover { color: var(--accent); }
+  .row-ext { font-size: 0.85em; margin-left: 0.25em; }
+  .row-excerpt {
+    font-family: var(--font-body);
+    font-size: 1rem;
+    color: var(--ink-soft);
+    margin-top: 0.5rem;
+    max-width: 60ch;
+  }
+  .row-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    flex-wrap: wrap;
+  }
+  .row-readtime {
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .row-arrow {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    align-self: center;
+  }
+  .row-arrow:hover { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    .row { grid-template-columns: 1fr; gap: 0.75rem; }
+    .row-arrow { display: none; }
+  }
+</style>
