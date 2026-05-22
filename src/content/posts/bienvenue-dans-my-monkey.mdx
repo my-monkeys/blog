@@ -8,6 +8,9 @@ project: "blog"
 draft: false
 ---
 
+import Mermaid from '@/components/Mermaid.astro';
+import Callout from '@/components/Callout.astro';
+
 Si t'as cliqué sur un sous-domaine de `my-monkey.fr` un jour, t'es à la bonne adresse. Voici le contexte.
 
 ## C'est quoi My-Monkey
@@ -55,7 +58,27 @@ Deux pieds :
 1. **O2switch** — shared hosting pour la majorité des sites statiques + petites APIs Node (~25 projets)
 2. **Cookie-server** — un Ubuntu chez moi, accessible via Tailscale, qui héberge Pterodactyl (serveurs Minecraft), une médiathèque Jellyfin, n8n, ComfyUI, et tout ce qui ne pourrait pas tourner sur du shared hosting
 
+<Mermaid
+  caption="Deux hosts, deux usages : O2switch sert le public statique, cookie-server porte tout ce qui demande du shell ou de la persistance lourde."
+  code={`
+flowchart LR
+  subgraph O2["O2switch — shared hosting"]
+    direction TB
+    P1["~25 sites publics<br/>en *.my-monkey.fr"]
+  end
+  subgraph Cookie["cookie-server — chez moi"]
+    direction TB
+    S1[Pterodactyl<br/>serveurs Minecraft]
+    S2[Jellyfin<br/>médiathèque]
+    S3[monkey<br/>deploy worker]
+    S4[n8n + ComfyUI<br/>+ services lourds]
+  end
+`}
+/>
+
+<Callout type="info" label="Pourquoi">
 Pas de Kubernetes, pas de Vercel, pas d'AWS. C'est pas un manifeste anti-cloud — c'est juste que pour 30 projets perso sans trafic, le ratio prix/complexité de ces solutions est mauvais.
+</Callout>
 
 ## Le pipeline de deploy
 

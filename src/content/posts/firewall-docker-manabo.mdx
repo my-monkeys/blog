@@ -145,10 +145,12 @@ curl http://manabo.cookie/health
 
 ## La leçon
 
+<Callout type="fix" label="Leçon">
 À chaque fois qu'un service tourne **directement sur l'hôte** (pas dans un container Docker) et doit être atteint **depuis un container** (typiquement Caddy reverse-proxy), il faut :
 
 1. Que le service écoute sur `0.0.0.0` ou explicitement sur `172.17.0.1` (l'IP de l'hôte vue depuis Docker)
 2. Que UFW autorise le range Docker à atteindre ce port
+</Callout>
 
 J'ai depuis ajouté un script qui ouvre automatiquement tous les ports host-direct utilisés par Caddy :
 
@@ -168,6 +170,6 @@ sudo ufw reload
 
 Lancé après chaque modif du `Caddyfile`. Si un jour j'ajoute un nouveau service host-direct, plus jamais de timeout silencieux.
 
-## TL;DR
-
+<Callout type="info" label="TL;DR">
 Si Caddy en container Docker timeout vers `host.docker.internal:XXXX` alors que le service tourne bien sur l'hôte → **regarde UFW avant tout**.
+</Callout>
