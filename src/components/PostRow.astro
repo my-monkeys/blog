@@ -13,7 +13,7 @@ const date = d.date.toLocaleDateString('en-US', { month: 'short', day: '2-digit'
 const year = d.date.getFullYear();
 const minutes = readingTimeMinutes(post.body);
 
-const href = d.type === 'link' ? d.url! : `/posts/${post.slug}`;
+const href = d.type === 'link' ? d.url! : `/posts/${post.slug}/`;
 const external = d.type === 'link';
 
 // extract version from filename for type=update (manabo-v1-0-0 -> v1.0.0)
