@@ -1,0 +1,14 @@
+/* Overrides for astro-expressive-code */
+.expressive-code {
+  margin: 1.75em 0;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+.expressive-code .frame {
+  border: 2px solid var(--ink) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+.expressive-code code {
+  font-family: var(--font-mono);
+}
