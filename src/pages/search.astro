@@ -1,0 +1,18 @@
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import SearchBox from '@/components/SearchBox.astro';
+---
+
+<BaseLayout title="Search — Blog My-Monkey" noIndex>
+  <section class="search-page">
+    <p class="meta">Search</p>
+    <h1 class="post-title">Chercher</h1>
+    <SearchBox />
+  </section>
+</BaseLayout>
+
+<style>
+  .search-page { padding: 3rem 0 6rem; }
+  .search-page .meta { margin-bottom: 0.5rem; }
+  .search-page .post-title { margin-bottom: 2rem; }
+</style>

@@ -1,0 +1,33 @@
+---
+// Pagefind UI loads from /pagefind/pagefind-ui.js, available after build.
+---
+
+<div id="search" class="search-host"></div>
+
+<link href="/pagefind/pagefind-ui.css" rel="stylesheet" />
+<script src="/pagefind/pagefind-ui.js" is:inline></script>
+<script is:inline>
+  window.addEventListener('DOMContentLoaded', () => {
+    if (typeof PagefindUI !== 'undefined') {
+      new PagefindUI({
+        element: '#search',
+        showSubResults: true,
+        showImages: false,
+        excerptLength: 30,
+        translations: { placeholder: 'Chercher dans le blog…', clear_search: 'Effacer', zero_results: 'Aucun résultat pour [SEARCH_TERM]' },
+      });
+    }
+  });
+</script>
+
+<style>
+  .search-host {
+    --pagefind-ui-primary: var(--ink);
+    --pagefind-ui-text: var(--ink);
+    --pagefind-ui-background: var(--bg);
+    --pagefind-ui-border: var(--ink);
+    --pagefind-ui-tag: var(--bg-elev);
+    --pagefind-ui-border-radius: 0;
+    --pagefind-ui-font: var(--font-ui);
+  }
+</style>
