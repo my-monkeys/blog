@@ -13,6 +13,13 @@ export default defineConfig({
   build: {
     format: 'directory',
   },
+  // Math plugins at top-level so mdx() inherits them WITHOUT overriding
+  // the remark/rehype chain that astro-expressive-code injects (which
+  // processes ```lang code blocks into framed UI with copy buttons).
+  markdown: {
+    remarkPlugins: [remarkMath],
+    rehypePlugins: [rehypeKatex],
+  },
   integrations: [
     expressiveCode({
       themes: ['github-light', 'github-dark-dimmed'],
@@ -23,10 +30,7 @@ export default defineConfig({
         codeFontFamily: 'JetBrains Mono, ui-monospace, monospace',
       },
     }),
-    mdx({
-      remarkPlugins: [remarkMath],
-      rehypePlugins: [rehypeKatex],
-    }),
+    mdx(),
     sitemap(),
     pagefind(),
     AstroPWA({
