@@ -1,0 +1,43 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import PostRow from '@/components/PostRow.astro';
+import FeaturedPost from '@/components/FeaturedPost.astro';
+
+const all = await getCollection('posts', ({ data }) => {
+  return !(import.meta.env.PROD && data.draft);
+});
+
+const posts = all.sort((a, b) => b.data.date.getTime() - a.data.date.getTime());
+
+// Decide which posts render as Featured (must have cover) — every 4th post
+const slots = posts.map((post, idx) => {
+  const isFeatured = post.data.cover && idx > 0 && idx % 4 === 0;
+  return { post, isFeatured };
+});
+---
+
+<BaseLayout title="Blog My-Monkey">
+  <section class="hero">
+    <h1 class="hero-display">BLOG</h1>
+    <p class="hero-sub">Carnet de bord d'une galaxie de projets perso. Updates, post-mortems, petits trucs.</p>
+  </section>
+
+  <section class="feed">
+    {slots.map(({ post, isFeatured }) =>
+      isFeatured ? <FeaturedPost post={post} /> : <PostRow post={post} />
+    )}
+  </section>
+</BaseLayout>
+
+<style>
+  .hero { padding: 4rem 0 3rem; }
+  .hero-sub {
+    font-family: var(--font-body);
+    font-size: 1.25rem;
+    color: var(--ink-soft);
+    margin-top: 1.5rem;
+    max-width: 50ch;
+  }
+  .feed { padding-bottom: 4rem; }
+</style>
