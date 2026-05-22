@@ -1,0 +1,17 @@
+{
+  "org": "my-monkeys",
+  "repos": [
+    "manabo",
+    "fapmap",
+    "kebab-shit-map",
+    "landing-page",
+    "piloo",
+    "showroom",
+    "porndle-next",
+    "geography",
+    "uptime",
+    "blog"
+  ],
+  "skip_prerelease": true,
+  "skip_empty_body": true
+}
