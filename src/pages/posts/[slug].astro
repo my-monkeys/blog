@@ -3,21 +3,24 @@ import { getCollection } from 'astro:content';
 import PostLayout from '@/layouts/PostLayout.astro';
 
 export async function getStaticPaths() {
-  const posts = await getCollection('posts', ({ data }) => {
+  const all = await getCollection('posts', ({ data }) => {
     if (import.meta.env.PROD && data.draft) return false;
-    if (data.type === 'link') return false; // links don't have their own page
     return true;
   });
-  return posts.map((post) => ({
+  // Pages are generated only for non-link posts, but we still pass the
+  // full `all` array to PostLayout so prev/next/related can consider
+  // every published post.
+  const renderable = all.filter((p) => p.data.type !== 'link');
+  return renderable.map((post) => ({
     params: { slug: post.slug },
-    props: { post },
+    props: { post, allPosts: all },
   }));
 }
 
-const { post } = Astro.props;
+const { post, allPosts } = Astro.props;
 const { Content, headings } = await post.render();
 ---
 
-<PostLayout post={post} headings={headings}>
+<PostLayout post={post} headings={headings} allPosts={allPosts}>
   <Content />
 </PostLayout>

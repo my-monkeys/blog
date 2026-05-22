@@ -1,0 +1,96 @@
+---
+import { codeToHtml } from 'shiki';
+
+export interface Props {
+  before: string;
+  after: string;
+  lang?: string;
+  beforeLabel?: string;
+  afterLabel?: string;
+  caption?: string;
+}
+const {
+  before,
+  after,
+  lang = 'text',
+  beforeLabel = 'Avant',
+  afterLabel = 'Après',
+  caption,
+} = Astro.props;
+
+const beforeLight = await codeToHtml(before, { lang, theme: 'github-light' });
+const beforeDark = await codeToHtml(before, { lang, theme: 'github-dark-dimmed' });
+const afterLight = await codeToHtml(after, { lang, theme: 'github-light' });
+const afterDark = await codeToHtml(after, { lang, theme: 'github-dark-dimmed' });
+---
+
+<figure class="codediff">
+  <div class="codediff-grid">
+    <div class="codediff-side codediff-before">
+      <div class="codediff-label">{beforeLabel}</div>
+      <div class="codediff-code codediff-light" set:html={beforeLight} />
+      <div class="codediff-code codediff-dark" set:html={beforeDark} />
+    </div>
+    <div class="codediff-side codediff-after">
+      <div class="codediff-label">{afterLabel}</div>
+      <div class="codediff-code codediff-light" set:html={afterLight} />
+      <div class="codediff-code codediff-dark" set:html={afterDark} />
+    </div>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style is:global>
+  .codediff {
+    margin: 2em 0;
+  }
+  .codediff-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border: 2px solid var(--ink);
+  }
+  .codediff-side {
+    min-width: 0;
+    overflow: hidden;
+  }
+  .codediff-before { border-right: 2px solid var(--ink); background: rgba(255, 94, 120, 0.06); }
+  .codediff-after { background: rgba(46, 204, 113, 0.07); }
+  [data-theme='dark'] .codediff-before { background: rgba(255, 94, 120, 0.12); }
+  [data-theme='dark'] .codediff-after { background: rgba(46, 204, 113, 0.12); }
+  .codediff-label {
+    font-family: var(--font-ui);
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    padding: 0.5rem 0.75rem;
+    border-bottom: 2px solid var(--ink);
+    background: var(--bg-elev);
+  }
+  .codediff-before .codediff-label { color: var(--alert); }
+  .codediff-after .codediff-label { color: var(--ok); }
+  .codediff-code {
+    overflow-x: auto;
+    padding: 0.75rem;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+  .codediff-code pre { margin: 0; background: transparent !important; }
+  .codediff-dark { display: none; }
+  [data-theme='dark'] .codediff-light { display: none; }
+  [data-theme='dark'] .codediff-dark { display: block; }
+  .codediff figcaption {
+    margin-top: 0.5rem;
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+  @media (max-width: 720px) {
+    .codediff-grid { grid-template-columns: 1fr; }
+    .codediff-before { border-right: 0; border-bottom: 2px solid var(--ink); }
+  }
+</style>

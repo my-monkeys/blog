@@ -284,6 +284,80 @@ Theme auto-adapté au mode light/dark **au premier rendu** (pas dynamique si on 
 
 Si le diagramme contient une erreur de syntaxe, le bloc affiche un cadre rouge avec "Mermaid render failed (voir console)" — pratique pour debug.
 
+**`<CodeDiff>`** — bloc avant/après côte à côte, syntax-highlighted via Shiki (theme dual light/dark) :
+
+```mdx
+import CodeDiff from '@/components/CodeDiff.astro';
+
+<CodeDiff
+  lang="javascript"
+  caption="Avant le fix, après le fix"
+  before={`function add(a, b) {
+  return a + b;
+}`}
+  after={`function add(a, b) {
+  if (typeof a !== 'number') throw new Error('a must be number');
+  if (typeof b !== 'number') throw new Error('b must be number');
+  return a + b;
+}`}
+/>
+```
+
+Props : `before`, `after`, `lang`, `beforeLabel?` (default "Avant"), `afterLabel?` (default "Après"), `caption?`. Side-by-side desktop, stacké mobile.
+
+**`<Video>`** — embed vidéo locale (ou URL absolue) avec controls par défaut :
+
+```mdx
+import Video from '@/components/Video.astro';
+
+<Video
+  src="/videos/demo-deploy.mp4"
+  poster="/videos/demo-deploy.jpg"
+  caption="Demo du pipeline .monkey en action"
+/>
+```
+
+Props : `src` (requis), `poster?`, `caption?`, `autoplay?`, `loop?`, `muted?` (true par défaut si autoplay), `controls?` (true sauf si autoplay), `width?`, `height?`. Les vidéos vont dans `public/videos/` (Astro ne touche pas aux .mp4).
+
+**Tweet embed** — via `@astro-community/astro-embed-twitter` (rendu statique au build, pas de JS tiers à runtime) :
+
+```mdx
+import { Tweet } from '@astro-community/astro-embed-twitter';
+
+<Tweet id="https://twitter.com/jack/status/20" />
+```
+
+**YouTube embed** — pareil :
+
+```mdx
+import { YouTube } from '@astro-community/astro-embed-youtube';
+
+<YouTube id="dQw4w9WgXcQ" title="Démo" />
+```
+
+### 6. Math (KaTeX)
+
+Activé via `remark-math` + `rehype-katex`. CSS KaTeX importé global dans `global.css`.
+
+Syntaxe inline avec `$...$`, bloc avec `$$...$$` :
+
+```mdx
+La complexité est en $O(n \log n)$.
+
+Théorème :
+$$
+\sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+$$
+```
+
+### 7. Commentaires
+
+Section `<Comments />` ajoutée automatiquement à la fin de chaque post via `PostLayout`. Backed par **Giscus** + GitHub Discussions sur `my-monkeys/blog` (catégorie "General"). Mapping par pathname → 1 thread par post.
+
+**Setup requis** (one-shot, à faire si pas encore) : installer le GitHub App Giscus sur le repo → https://github.com/apps/giscus → "Only select repositories" → cocher `my-monkeys/blog`. Sans ça, l'iframe s'affiche mais le post ne marche pas.
+
+Theme dark/light suit automatiquement le `data-theme` du blog (postMessage à l'iframe au toggle).
+
 ### 5. Ajouter des images
 
 #### Image inline dans un article

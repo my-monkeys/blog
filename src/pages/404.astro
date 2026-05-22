@@ -1,0 +1,60 @@
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="404 — Blog My-Monkey" description="Page introuvable." noIndex>
+  <section class="notfound">
+    <p class="meta">Erreur</p>
+    <h1 class="notfound-code">404</h1>
+    <p class="notfound-msg">Cette page n'existe pas (ou plus).</p>
+    <p class="notfound-sub">Si t'es arrivé ici depuis un lien externe, c'est probablement de ma faute. Si t'as tapé l'URL à la main, c'est probablement de la tienne.</p>
+    <ul class="notfound-links">
+      <li><a href="/">← Retour à la home</a></li>
+      <li><a href="/search/">Chercher dans le blog</a></li>
+      <li><a href="https://my-monkey.fr">Voir tous les projets My-Monkey</a></li>
+    </ul>
+  </section>
+</BaseLayout>
+
+<style>
+  .notfound { padding: 4rem 0 6rem; max-width: 60ch; }
+  .notfound .meta { margin-bottom: 0.75rem; }
+  .notfound-code {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(6rem, 18vw, 12rem);
+    line-height: 0.95;
+    letter-spacing: -0.04em;
+    margin-bottom: 1rem;
+    color: var(--accent);
+  }
+  .notfound-msg {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(1.5rem, 3vw, 2rem);
+    line-height: 1.2;
+    margin-bottom: 1rem;
+  }
+  .notfound-sub {
+    font-family: var(--font-body);
+    font-size: 1.0625rem;
+    color: var(--ink-soft);
+    margin-bottom: 2.5rem;
+  }
+  .notfound-links {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    border-top: 2px solid var(--ink);
+  }
+  .notfound-links li {
+    border-bottom: 1px solid var(--ink);
+    padding: 1rem 0;
+  }
+  .notfound-links a {
+    font-family: var(--font-ui);
+    font-weight: 500;
+    font-size: 1rem;
+  }
+  .notfound-links a:hover { color: var(--accent); }
+</style>

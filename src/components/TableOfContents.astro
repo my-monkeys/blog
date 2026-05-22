@@ -37,5 +37,16 @@ const filtered = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
   .toc ul { list-style: none; margin: 0; padding: 0; }
   .toc li { margin: 0.4rem 0; }
   .toc-depth-3 { padding-left: 1rem; font-size: 0.825rem; color: var(--ink-soft); }
+  .toc a {
+    display: inline-block;
+    padding-left: 0.5rem;
+    border-left: 2px solid transparent;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
   .toc a:hover { color: var(--accent); }
+  .toc a.is-active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    font-weight: 600;
+  }
 </style>

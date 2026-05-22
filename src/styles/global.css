@@ -9,6 +9,9 @@
 @import '@fontsource/jetbrains-mono/500.css';
 @import '@fontsource/jetbrains-mono/700.css';
 
+/* KaTeX styles (math rendering) */
+@import 'katex/dist/katex.min.css';
+
 :root {
   --bg: #FFFBEB;
   --bg-elev: #FFF7D6;

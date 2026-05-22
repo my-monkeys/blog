@@ -1,0 +1,95 @@
+---
+// Giscus comments — backed by GitHub Discussions on my-monkeys/blog.
+// Requires the giscus GitHub App to be installed on the repo
+// (https://github.com/apps/giscus). Without it, the iframe loads but
+// posting won't work.
+//
+// Theme follows the user's data-theme attribute and updates on toggle.
+---
+
+<section class="comments" aria-label="Commentaires">
+  <h2 class="section-heading">Commentaires</h2>
+  <p class="comments-intro">
+    Login GitHub pour réagir. Backed by <a href="https://github.com/my-monkeys/blog/discussions" rel="external">GitHub Discussions</a>.
+  </p>
+  <div class="giscus"></div>
+</section>
+
+<script is:inline>
+  (function () {
+    function pickTheme() {
+      return document.documentElement.getAttribute('data-theme') === 'dark'
+        ? 'dark_dimmed'
+        : 'light';
+    }
+
+    function load() {
+      const host = document.querySelector('.giscus');
+      if (!host || host.dataset.loaded === '1') return;
+      host.dataset.loaded = '1';
+
+      const s = document.createElement('script');
+      s.src = 'https://giscus.app/client.js';
+      s.async = true;
+      s.crossOrigin = 'anonymous';
+      s.setAttribute('data-repo', 'my-monkeys/blog');
+      s.setAttribute('data-repo-id', 'R_kgDOSlMjIA');
+      s.setAttribute('data-category', 'General');
+      s.setAttribute('data-category-id', 'DIC_kwDOSlMjIM4C9pHM');
+      s.setAttribute('data-mapping', 'pathname');
+      s.setAttribute('data-strict', '0');
+      s.setAttribute('data-reactions-enabled', '1');
+      s.setAttribute('data-emit-metadata', '0');
+      s.setAttribute('data-input-position', 'top');
+      s.setAttribute('data-theme', pickTheme());
+      s.setAttribute('data-lang', 'fr');
+      s.setAttribute('data-loading', 'lazy');
+      host.appendChild(s);
+    }
+
+    function postThemeMessage(theme) {
+      const iframe = document.querySelector('iframe.giscus-frame');
+      if (!iframe) return;
+      iframe.contentWindow.postMessage(
+        { giscus: { setConfig: { theme } } },
+        'https://giscus.app',
+      );
+    }
+
+    // Observe theme toggle and update iframe live.
+    const obs = new MutationObserver(() => {
+      postThemeMessage(pickTheme());
+    });
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+    document.addEventListener('astro:page-load', load);
+  })();
+</script>
+
+<style>
+  .comments {
+    margin-top: 4rem;
+    padding-top: 2rem;
+    border-top: 2px solid var(--ink);
+  }
+  .comments .section-heading {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 0.875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 0.75rem;
+  }
+  .comments-intro {
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    color: var(--ink-soft);
+    margin-bottom: 1.5rem;
+  }
+  .comments-intro a {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .giscus { min-height: 8rem; }
+</style>

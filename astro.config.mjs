@@ -4,6 +4,8 @@ import sitemap from '@astrojs/sitemap';
 import expressiveCode from 'astro-expressive-code';
 import pagefind from 'astro-pagefind';
 import AstroPWA from '@vite-pwa/astro';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 export default defineConfig({
   site: 'https://blog.my-monkey.fr',
@@ -21,7 +23,10 @@ export default defineConfig({
         codeFontFamily: 'JetBrains Mono, ui-monospace, monospace',
       },
     }),
-    mdx(),
+    mdx({
+      remarkPlugins: [remarkMath],
+      rehypePlugins: [rehypeKatex],
+    }),
     sitemap(),
     pagefind(),
     AstroPWA({

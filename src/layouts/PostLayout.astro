@@ -7,22 +7,52 @@ import TypeBadge from '@/components/TypeBadge.astro';
 import ProjectBadge from '@/components/ProjectBadge.astro';
 import TagPill from '@/components/TagPill.astro';
 import TableOfContents from '@/components/TableOfContents.astro';
+import Comments from '@/components/Comments.astro';
 import { readingTimeMinutes } from '@/lib/readingTime.js';
+import { prevNext, relatedPosts } from '@/lib/postRelations.js';
 
 export interface Props {
   post: CollectionEntry<'posts'>;
   headings: MarkdownHeading[];
+  allPosts: CollectionEntry<'posts'>[];
 }
-const { post, headings } = Astro.props;
+const { post, headings, allPosts } = Astro.props;
 const d = post.data;
 const minutes = readingTimeMinutes(post.body);
 const date = d.date.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
 
 const sourceFile = `https://github.com/my-monkeys/blog/blob/main/src/content/posts/${post.id}`;
 const ogImage = `/og/${post.slug}.png`;
+
+const { newer, older } = prevNext(post, allPosts);
+const related = relatedPosts(post, allPosts, 3);
+
+const ldJson = {
+  '@context': 'https://schema.org',
+  '@type': 'BlogPosting',
+  headline: d.title,
+  description: d.excerpt,
+  datePublished: d.date.toISOString(),
+  image: new URL(ogImage, Astro.site).toString(),
+  url: new URL(Astro.url.pathname, Astro.site).toString(),
+  mainEntityOfPage: new URL(Astro.url.pathname, Astro.site).toString(),
+  inLanguage: 'fr-FR',
+  author: { '@type': 'Person', name: 'Maxim Costa', url: 'https://my-monkey.fr' },
+  publisher: {
+    '@type': 'Organization',
+    name: 'My-Monkey',
+    url: 'https://my-monkey.fr',
+    logo: { '@type': 'ImageObject', url: 'https://blog.my-monkey.fr/icon-512.png' },
+  },
+  keywords: d.tags.join(', '),
+  wordCount: post.body.trim().split(/\s+/).filter(Boolean).length,
+};
 ---
 
 <BaseLayout title={`${d.title} — Blog My-Monkey`} description={d.excerpt} ogImage={ogImage} noIndex={d.draft}>
+  <script type="application/ld+json" set:html={JSON.stringify(ldJson)} />
+  <div class="read-progress" aria-hidden="true"></div>
+
   <article class="post">
     <header class="post-header">
       <div class="post-meta">
@@ -60,12 +90,70 @@ const ogImage = `/og/${post.slug}.png`;
         <span> · </span>
         <a href="/rss.xml">RSS</a>
       </div>
-      <a href="/" class="post-back">← Tous les posts</a>
     </footer>
+
+    {related.length > 0 && (
+      <section class="related" aria-labelledby="related-heading">
+        <h2 id="related-heading" class="section-heading">À lire aussi</h2>
+        <ul class="related-list">
+          {related.map((r) => (
+            <li>
+              <a href={`/posts/${r.slug}/`} class="related-link">
+                <span class="related-title">{r.data.title}</span>
+                {r.data.excerpt && <span class="related-excerpt">{r.data.excerpt}</span>}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
+
+    {(newer || older) && (
+      <nav class="prevnext" aria-label="Navigation entre posts">
+        <div class="prevnext-cell">
+          {newer ? (
+            <a href={`/posts/${newer.slug}/`} class="prevnext-link">
+              <span class="prevnext-label">← Plus récent</span>
+              <span class="prevnext-title">{newer.data.title}</span>
+            </a>
+          ) : <span />}
+        </div>
+        <div class="prevnext-cell prevnext-right">
+          {older ? (
+            <a href={`/posts/${older.slug}/`} class="prevnext-link">
+              <span class="prevnext-label">Plus ancien →</span>
+              <span class="prevnext-title">{older.data.title}</span>
+            </a>
+          ) : <span />}
+        </div>
+      </nav>
+    )}
+
+    <Comments />
+
+    <a href="/" class="post-back">← Tous les posts</a>
   </article>
 </BaseLayout>
 
+<script>
+  import '@/scripts/post-progress.ts';
+</script>
+
 <style>
+  .read-progress {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--accent);
+    transform: scaleX(0);
+    transform-origin: 0 50%;
+    z-index: 100;
+    pointer-events: none;
+    transition: transform 0.1s linear;
+  }
+
   .post { padding-top: 2rem; padding-bottom: 4rem; }
   .post-header { margin-bottom: 2rem; }
   .post-meta {
@@ -114,7 +202,84 @@ const ogImage = `/og/${post.slug}.png`;
   }
   .post-foot-links a { text-decoration: underline; }
   .post-foot-links a:hover { color: var(--accent); }
+
+  .section-heading {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 0.875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 1.25rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .related { margin-top: 4rem; }
+  .related-list { list-style: none; padding: 0; margin: 0; }
+  .related-list li {
+    border-bottom: 1px solid var(--ink);
+    padding: 1.25rem 0;
+  }
+  .related-list li:last-child { border-bottom: 0; }
+  .related-link {
+    display: block;
+  }
+  .related-title {
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.125rem;
+    line-height: 1.3;
+  }
+  .related-link:hover .related-title { color: var(--accent); }
+  .related-excerpt {
+    display: block;
+    font-family: var(--font-body);
+    font-size: 0.9375rem;
+    color: var(--ink-soft);
+    margin-top: 0.35rem;
+    max-width: 60ch;
+  }
+
+  .prevnext {
+    margin-top: 3rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    border-top: 2px solid var(--ink);
+    border-bottom: 2px solid var(--ink);
+    padding: 1.5rem 0;
+  }
+  .prevnext-cell { min-width: 0; }
+  .prevnext-right { text-align: right; }
+  .prevnext-link { display: block; }
+  .prevnext-label {
+    display: block;
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 0.35rem;
+  }
+  .prevnext-title {
+    display: block;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1rem;
+    line-height: 1.3;
+  }
+  .prevnext-link:hover .prevnext-title { color: var(--accent); }
+  @media (max-width: 640px) {
+    .prevnext { grid-template-columns: 1fr; }
+    .prevnext-right { text-align: left; }
+  }
+
   .post-back {
+    display: inline-block;
+    margin-top: 2rem;
     font-family: var(--font-ui);
     font-weight: 600;
     letter-spacing: 0.05em;
