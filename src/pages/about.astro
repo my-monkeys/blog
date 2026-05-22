@@ -1,0 +1,25 @@
+---
+import BaseLayout from '@/layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="About — Blog My-Monkey" description="À propos du blog My-Monkey.">
+  <article class="about prose">
+    <p class="meta">About</p>
+    <h1 class="post-title">À propos</h1>
+    <p>Ce blog est le carnet de bord de <a href="https://my-monkey.fr">My-Monkey</a> — une galaxie d'une trentaine de projets perso (web, mobile, jeux, outils internes).</p>
+    <p>On y poste :</p>
+    <ul>
+      <li>L'actualité du collectif</li>
+      <li>Les <a href="/updates">updates</a> de chaque projet (générées automatiquement depuis les releases GitHub)</li>
+      <li>Des post-mortems de défis techniques</li>
+      <li>Des liens et lectures partagés en passant</li>
+    </ul>
+    <p>Voir aussi : <a href="/now">/now</a>, <a href="/rss.xml">RSS</a>.</p>
+  </article>
+</BaseLayout>
+
+<style>
+  .about { padding: 3rem 0 4rem; }
+  .about .meta { margin-bottom: 0.5rem; }
+  .about .post-title { margin-bottom: 1.5rem; }
+</style>

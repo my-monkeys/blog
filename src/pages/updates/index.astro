@@ -1,0 +1,27 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import PostRow from '@/components/PostRow.astro';
+
+const updates = await getCollection('posts', ({ data }) => {
+  if (import.meta.env.PROD && data.draft) return false;
+  return data.type === 'update';
+});
+const sorted = updates.sort((a, b) => b.data.date.getTime() - a.data.date.getTime());
+---
+
+<BaseLayout title="Updates — Blog My-Monkey" description="Changelog global des projets My-Monkey.">
+  <section class="archive-head">
+    <p class="meta">Changelog global</p>
+    <h1 class="post-title">Updates</h1>
+    <p class="meta">{sorted.length} release{sorted.length > 1 ? 's' : ''}</p>
+  </section>
+  <section class="feed">
+    {sorted.map((post) => <PostRow post={post} />)}
+  </section>
+</BaseLayout>
+
+<style>
+  .archive-head { padding: 3rem 0 2rem; }
+  .feed { padding-bottom: 4rem; }
+</style>

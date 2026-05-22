@@ -1,0 +1,21 @@
+---
+import { getEntry } from 'astro:content';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+
+const now = await getEntry('now', 'now');
+if (!now) throw new Error('Missing now.md content entry');
+const { Content } = await now.render();
+const updated = now.data.updated.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+---
+
+<BaseLayout title="Now — Blog My-Monkey" description="Ce sur quoi je bosse en ce moment.">
+  <article class="now">
+    <p class="meta">Mis à jour le {updated}</p>
+    <div class="prose"><Content /></div>
+  </article>
+</BaseLayout>
+
+<style>
+  .now { padding: 3rem 0 4rem; }
+  .now .meta { margin-bottom: 2rem; }
+</style>
