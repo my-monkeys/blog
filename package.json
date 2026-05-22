@@ -1,0 +1,34 @@
+{
+  "name": "blog-my-monkey",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist",
+    "preview": "astro preview",
+    "check": "astro check",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sync-releases": "node scripts/sync-releases.mjs"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.0.0",
+    "@astrojs/rss": "^4.0.0",
+    "@astrojs/sitemap": "^3.2.0",
+    "@resvg/resvg-js": "^2.6.0",
+    "astro": "^5.0.0",
+    "astro-expressive-code": "^0.40.0",
+    "astro-pagefind": "^1.7.0",
+    "gsap": "^3.14.2",
+    "pagefind": "^1.2.0",
+    "satori": "^0.12.0",
+    "satori-html": "^0.3.2"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
