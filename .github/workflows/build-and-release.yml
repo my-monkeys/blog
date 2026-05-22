@@ -1,0 +1,42 @@
+name: build-and-release
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'scripts/**'
+      - 'astro.config.mjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.monkey'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - name: Create tarball (top-level dir required by monkey)
+        run: |
+          mkdir -p /tmp/pack/blog
+          # Tar the whole project minus heavy/uncessary stuff. The .monkey worker
+          # reads .monkey from the top-level dir AND extracts source according to it.
+          rsync -a --exclude='.git' --exclude='node_modules' --exclude='oauth' \
+                --exclude='.github' ./ /tmp/pack/blog/
+          tar czf /tmp/app.tgz -C /tmp/pack blog
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(date -u +%Y.%m.%d-%H%M%S)"
+          gh release create "$TAG" /tmp/app.tgz --title "$TAG" --notes "Auto-deploy from main"
