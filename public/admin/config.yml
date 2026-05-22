@@ -1,0 +1,74 @@
+backend:
+  name: github
+  repo: my-monkeys/blog
+  branch: main
+  base_url: https://decap-oauth.my-monkey.fr
+  auth_endpoint: auth
+
+publish_mode: simple
+media_folder: src/content/posts/_assets
+public_folder: /_assets
+
+collections:
+  - name: posts
+    label: Posts
+    folder: src/content/posts
+    create: true
+    slug: '{{slug}}'
+    extension: mdx
+    format: frontmatter
+    fields:
+      - { name: title, label: Titre, widget: string }
+      - { name: date, label: Date, widget: datetime, format: 'YYYY-MM-DD', date_format: 'YYYY-MM-DD', time_format: false }
+      - name: type
+        label: Type
+        widget: select
+        options: [article, update, post-mortem, link]
+        default: article
+      - { name: excerpt, label: Excerpt, widget: text, required: false }
+      - { name: tags, label: Tags, widget: list, required: false }
+      - name: project
+        label: Projet lié
+        widget: select
+        required: false
+        options:
+          - alloc-warrior
+          - arcade
+          - asso
+          - auth-mymonkey
+          - bananaclicker
+          - blog
+          - chirurgien
+          - clique-salope
+          - controller
+          - fapmap
+          - geography
+          - kebab-shit-map
+          - landing-page
+          - manabo
+          - mapmap
+          - michto-scale
+          - milkylog
+          - monkey
+          - movies
+          - papers
+          - piloo
+          - porndle-next
+          - showroom
+          - support
+          - traquenard
+          - uptime
+      - { name: cover, label: Image cover, widget: image, required: false }
+      - { name: url, label: 'URL (type=link uniquement)', widget: string, required: false }
+      - { name: draft, label: Brouillon, widget: boolean, default: true }
+      - { name: body, label: Contenu, widget: markdown }
+
+  - name: now
+    label: Now page
+    files:
+      - file: src/content/now/now.md
+        name: now
+        label: Now
+        fields:
+          - { name: updated, label: 'Mis à jour le', widget: datetime, format: 'YYYY-MM-DD', date_format: 'YYYY-MM-DD', time_format: false }
+          - { name: body, label: Contenu, widget: markdown }
