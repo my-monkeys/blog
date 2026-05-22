@@ -13,7 +13,7 @@ export interface Props {
 
 const {
   title,
-  description = "Carnet de bord d'une galaxie de projets perso.",
+  description = "Blog My-Monkey — carnet de bord d'une galaxie d'une trentaine de projets perso : updates, post-mortems et défis techniques.",
   ogImage = '/og-default.png',
   noIndex = false,
 } = Astro.props;
@@ -27,6 +27,9 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#FFFBEB" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0E0E10" media="(prefers-color-scheme: dark)" />
     <title>{title}</title>
     <meta name="description" content={description} />
     {noIndex && <meta name="robots" content="noindex" />}
@@ -37,6 +40,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <meta property="og:url" content={canonical} />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={new URL(ogImage, Astro.site).toString()} />
     <link rel="alternate" type="application/rss+xml" title="Blog My-Monkey" href="/rss.xml" />
     <ClientRouter />
     <script>

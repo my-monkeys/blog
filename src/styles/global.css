@@ -1,11 +1,20 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=JetBrains+Mono:wght@400;500;700&display=swap');
+/* Self-hosted fonts via Fontsource (no render-blocking external request) */
+@import '@fontsource/space-grotesk/400.css';
+@import '@fontsource/space-grotesk/500.css';
+@import '@fontsource/space-grotesk/600.css';
+@import '@fontsource/space-grotesk/700.css';
+@import '@fontsource-variable/newsreader';
+@import '@fontsource-variable/newsreader/wght-italic.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/700.css';
 
 :root {
   --bg: #FFFBEB;
   --bg-elev: #FFF7D6;
   --ink: #1E1E1E;
   --ink-soft: #4A4A4A;
-  --accent: #FF6B35;
+  --accent: #C2410C;
   --ok: #2ECC71;
   --alert: #FF5E78;
   --info: #004E89;
