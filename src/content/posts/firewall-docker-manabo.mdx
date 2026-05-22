@@ -10,6 +10,8 @@ draft: false
 
 import Mortem from '@/components/Mortem.astro';
 import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+import Callout from '@/components/Callout.astro';
 
 <Mortem
   symptom="manabo.cookie répond systématiquement 502 Bad Gateway. Le container manabo lui-même tourne et répond bien sur localhost:3456 depuis l'hôte. Caddy log : 'dial tcp 172.17.0.1:3456: i/o timeout'."
@@ -98,11 +100,37 @@ Mais pourquoi ça marchait avant ? J'ai dû modifier UFW un soir sans m'en souve
 
 ## Le fix
 
+<Callout type="fix">
+Une seule règle UFW à ajouter, et c'est réparé.
+</Callout>
+
 ```bash
 sudo ufw allow from 172.16.0.0/12 to any port 3456 proto tcp \
   comment 'manabo from Docker'
 sudo ufw reload
 ```
+
+L'état de la table UFW avant/après le fix :
+
+<CodeDiff
+  lang="bash"
+  beforeLabel="Avant : aucune règle pour 3456"
+  afterLabel="Après : range Docker autorisé"
+  caption="sudo ufw status numbered"
+  before={`Status: active
+
+     To                Action      From
+     --                ------      ----
+[ 1] 22/tcp            ALLOW IN    Anywhere
+[ 2] 80,443/tcp        ALLOW IN    Anywhere`}
+  after={`Status: active
+
+     To                Action      From
+     --                ------      ----
+[ 1] 22/tcp            ALLOW IN    Anywhere
+[ 2] 80,443/tcp        ALLOW IN    Anywhere
+[ 3] 3456/tcp          ALLOW IN    172.16.0.0/12   # manabo from Docker`}
+/>
 
 Pourquoi `172.16.0.0/12` et pas `172.17.0.0/16` ? Parce que Docker peut utiliser plusieurs ranges (`172.17.x`, `172.18.x`, etc. selon les networks créés). Le `/12` couvre toute la plage Docker conventionnelle (`172.16.0.0` à `172.31.255.255`).
 
