@@ -6,7 +6,7 @@ import pagefind from 'astro-pagefind';
 
 export default defineConfig({
   site: 'https://blog.my-monkey.fr',
-  trailingSlash: 'never',
+  trailingSlash: 'always',
   build: {
     format: 'directory',
   },
