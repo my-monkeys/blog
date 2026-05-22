@@ -1,0 +1,518 @@
+---
+title: "monkey — comment j'ai branché GitHub Releases sur un hébergeur mutualisé"
+date: 2026-05-22
+type: article
+excerpt: "Avant je déployais à coups de rsync depuis ma machine. Aujourd'hui, gh release create suffit. Récit du système maison qui écoute GitHub, parle cPanel, et publie sur O2switch."
+tags: ["devops", "infra", "github", "cpanel", "o2switch", "convex", "docker"]
+project: "monkey"
+draft: false
+---
+
+import Mermaid from '@/components/Mermaid.astro';
+
+Pendant longtemps, déployer un projet de mon monorepo `my-monkey/` ressemblait à ça :
+
+```bash
+npm run build
+rsync -avz dist/ coXXXX@coXXXX.odns.fr:/home/coXXXX/monprojet.my-monkey.fr/
+# … et prier
+```
+
+Pas de pipeline. Pas de logs. Aucune idée de qui a déployé quoi, quand. Et surtout : aucune trace si je voulais rollback. C'était nul. Donc j'ai construit **monkey** — un petit service auto-hébergé qui écoute les webhooks GitHub Release et déploie tout seul sur mon O2switch.
+
+Cet article raconte ce que j'ai appris en l'écrivant : pourquoi j'ai fait certains choix, où je me suis pris des murs, et comment ça tourne aujourd'hui.
+
+---
+
+## Le contexte : pourquoi O2switch et pas Vercel
+
+J'aurais pu tout mettre sur Vercel/Netlify/Cloudflare Pages. Mais :
+
+- J'ai déjà un O2switch payé qui héberge **une trentaine** de sous-projets. Le coût marginal d'un nouveau site est nul.
+- Beaucoup de mes apps tournent en Node.js avec une vraie DB MariaDB derrière. Passenger gère ça très bien.
+- Je voulais garder la main sur le serveur. C'est mon labo, pas un produit.
+
+Le seul truc qui manquait, c'était une couche au-dessus de SSH/rsync pour rendre les déploiements **reproductibles, observables et idempotents**. monkey, c'est ça.
+
+---
+
+## v1 : `o2monk`, un CLI à appeler à la main
+
+Avant monkey, il y a eu `o2monk` — un CLI Node.js dans le même repo, sorti en janvier 2026. L'ambition était plus modeste : packager les opérations cPanel les plus pénibles (créer un subdomain, créer une app Node, rsync, restart) derrière une commande unique.
+
+Le workflow tenait en une ligne :
+
+```bash
+cd ~/Documents/my-monkey/monprojet
+o2monk deploy .
+```
+
+Le CLI lisait un `.monkey` à la racine du projet, faisait `npm run build` en local, créait le subdomain via UAPI s'il manquait, créait l'app Node via `cloudlinux-selector` (en SSH), rsync, install des dépendances, restart. Tout depuis ma machine.
+
+J'avais peaufiné l'expérience :
+
+- Wrapper `o2monk` dans `bin/` pour l'avoir dans `$PATH`
+- Complétion Zsh (un fichier `bin/_o2monk` qui listait les sous-commandes)
+- Cache de hash : avant chaque deploy, `b3sum` sur le dossier ; si identique au précédent, skip
+- `o2monk deploy-recursive <root>` qui scannait tous les sous-dossiers, trouvait les `.monkey`, et les déployait dans l'ordre
+
+Le format `.monkey` v1 était plus permissif que celui d'aujourd'hui :
+
+```jsonc
+{
+  "target": "...",
+  "source": "./",
+  "exclude": ["node_modules", ".env", ".git"],
+  "nodejs_app": "...",
+  "setup": { ... },
+  "build_command": "npm run build",      // ← exécuté en local par le CLI
+  "htaccess_rules": ["..."],              // ← le CLI générait .htaccess
+  "post_deploy": "touch tmp/restart.txt"
+}
+```
+
+Et il y avait un bonus : `o2monk` existait aussi comme **serveur MCP** (`index.js`, ~1100 lignes). Les mêmes opérations exposées en tools à Claude. Je pouvais dire "déploie monprojet" dans une conversation et Claude appelait `o2switch_deploy`.
+
+### Pourquoi je l'ai jeté
+
+Quatre raisons, dans l'ordre où elles m'ont gêné :
+
+**1. Pas d'observabilité.** Le CLI affichait des logs dans le terminal et c'est tout. Si je déployais 5 projets avec `deploy-recursive` et que le 3ᵉ plantait, fallait scroller dans le buffer pour trouver le pourquoi. Aucune trace persistante. Aucun moyen de savoir "qu'est-ce que j'ai déployé la semaine dernière ?".
+
+**2. C'est moi qui devais lancer la commande.** Aucune automatisation. Si je voulais qu'un collaborateur déploie, il fallait qu'il clone le repo, installe les deps, ait mon `.env` (donc mes secrets API cPanel), et fasse `o2monk deploy`. Pas envisageable.
+
+**3. Le CLI exécutait du shell sur la machine du dev.** `build_command: "npm run build"` passait par `exec()`. Les `htaccess_rules` étaient assemblées et générées par le CLI. Le `.monkey` d'un projet influençait donc ce qui tournait sur ma machine. C'est OK quand on est seul, ça commence à puer dès qu'on partage le repo, et c'est une mauvaise idée dans tous les cas.
+
+**4. Le MCP server me liait à une session Claude active.** Le serveur MCP tourne *pendant* une conversation. Si je ferme Claude, plus de deploys. Pratique pour expérimenter, pas une vraie infra.
+
+Le coup de grâce a été le commit `8a305eb chore: remove legacy CLI + MCP + README rewrite`. Le repo passe d'un fichier `cli.js` (916 lignes) + un `index.js` (1128 lignes) à un monorepo pnpm en TypeScript strict avec zod, vitest, Convex, et un Docker compose. Beaucoup plus d'infrastructure, mais beaucoup plus de garanties.
+
+J'aurais pu garder le CLI à côté du serveur, pour les cas où je voulais déployer sans passer par GitHub Release. Je l'ai pas fait — c'était une porte d'entrée supplémentaire à maintenir, sans gain réel. Si un jour j'en ai besoin, je peux toujours utiliser `gh release create` depuis ma machine. Le tarball, c'est moi qui le construis.
+
+Visuellement, le saut entre les deux générations :
+
+<Mermaid
+  caption="v1 : trigger manuel, aucun historique. v2 : trigger GitHub Release, historique Convex + dashboard live."
+  code={`
+flowchart LR
+    subgraph V1["<b>v1 — o2monk</b> (janv. 2026)"]
+        direction TB
+        D1[Dev local]
+        CLI[<code>o2monk deploy .</code><br/><i>CLI Node.js</i>]
+        O1[O2switch]
+        D1 -- "build + rsync + UAPI" --> CLI --> O1
+    end
+
+    subgraph V2["<b>v2 — monkey</b> (mai 2026)"]
+        direction TB
+        D2[Dev local]
+        GH[GitHub Release]
+        SRV[<code>monkey-server</code><br/><i>cookie-server, Docker</i>]
+        CV[Convex<br/><i>historique + UI live</i>]
+        O2[O2switch]
+        D2 -- "gh release create" --> GH
+        GH -- "webhook" --> SRV
+        SRV --> O2
+        SRV --> CV
+    end
+`}
+/>
+
+À droite, le dev n'a plus rien d'autre à faire que `gh release create`. Tout le reste est observable et persistant.
+
+---
+
+## L'architecture v2 en une phrase
+
+<Mermaid
+  caption="Chemin d'un deploy : depuis gh release create jusqu'aux side-effects (Convex + O2switch)."
+  code={`
+flowchart TD
+    A["<code>gh release create vX.Y.Z app.tgz</code>"]
+    B["git.my-monkey.fr<br/><i>Cloudflare Tunnel</i>"]
+    C["Caddy on cookie-server<br/><i>reverse proxy</i>"]
+    D["monkey-server:8787<br/><i>Express + worker async</i>"]
+    E["Convex mutations<br/><i>historique + dashboard live</i>"]
+    F["rsync + cPanel UAPI<br/><i>file deploy + subdomain<br/>+ Node.js app mgmt</i>"]
+
+    A -- "webhook HMAC org-level" --> B
+    B -- "http" --> C
+    C --> D
+    D --> E
+    D --> F
+`}
+/>
+
+Le déclencheur est `gh release create`. Le destinataire final est mon hébergement O2switch. Entre les deux, **cookie-server** (ma machine Linux perso sous Ubuntu 24.04) sert d'orchestrateur. Elle reçoit le webhook via un Cloudflare Tunnel (parce que je ne veux pas exposer la machine en NAT direct), un Caddy fait le reverse proxy, et un container Docker `monkey-server` exécute le pipeline.
+
+---
+
+## Le format `.monkey` : la config voyage avec le code
+
+Chaque projet déployable contient un fichier `.monkey` à sa racine. Quand le tarball arrive sur le serveur, on lit ce fichier pour savoir quoi faire.
+
+```jsonc
+{
+  "target": "monprojet.my-monkey.fr",
+  "preprod_target": "preprod.monprojet.my-monkey.fr",
+  "source": "./dist/",
+  "nodejs_app": "monprojet-api",
+  "setup": {
+    "nodejs_version": "22.17.0",
+    "startup_file": "server.js",
+    "deployment_mode": "production"
+  },
+  "post_deploy": "touch tmp/restart.txt",
+  "migrations": {
+    "type": "mysql",
+    "db": "coXXXX_madb",
+    "creds_env": "MADB"
+  },
+  "site": {
+    "title": "Mon projet",
+    "description": "Une phrase courte.",
+    "category": "tool"
+  }
+}
+```
+
+Décision de design importante : **pas de registre central**. La config est versionnée avec le code. Si tu modifies la version de Node, c'est dans un commit, ça part dans la release suivante, et c'est appliqué au déploiement. Pas de drift possible entre "ce qui est sur le serveur" et "ce qui est dans le repo".
+
+J'ai un parser zod strict (`packages/core/src/monkey-config.ts`) qui **rejette** les anciens champs legacy (`build_command`, `htaccess_rules`, `exclude`, etc.). C'était volontaire : j'ai écrit cette v2 en sachant que je voulais virer la couche "le serveur exécute du shell arbitraire pour toi". Le build, c'est au dev local de le faire avant `gh release create`. Le serveur ne fait que rsync + restart.
+
+---
+
+## Le pipeline d'un deploy, phase par phase
+
+Côté serveur, un deploy enchaîne une série de phases bien ordonnées. Chacune émet un event vers Convex au début et à la fin — c'est ce qui alimente le dashboard live.
+
+<Mermaid
+  caption="Les phases d'un deploy. Toute erreur en cours de route fait basculer en failed et stoppe la chaîne."
+  code={`
+flowchart TD
+    A([webhook reçu, HMAC OK])
+    B[fetch<br/><i>download tarball depuis la release</i>]
+    C[extract<br/><i>untar + parse .monkey zod</i>]
+    D[cpanel<br/><i>subdomain créé si manquant</i>]
+    E{<code>nodejs_app</code><br/>défini ?}
+    F[nodejs setup<br/><i>cloudlinux-selector</i>]
+    G[rsync<br/><i>cookie-server → O2switch</i>]
+    H[nodejs install<br/><i>deps via UAPI</i>]
+    I{bloc <code>migrations</code><br/>présent ?}
+    J[migrations<br/><i>SQL idempotentes, voir plus bas</i>]
+    K[post_deploy<br/><i>commande shell distante</i>]
+    L[nodejs restart<br/><i>touch tmp/restart.txt</i>]
+    M([deploy success])
+    X([deploy failed])
+
+    A --> B --> C --> D --> E
+    E -- oui --> F --> G
+    E -- non --> G
+    G --> H
+    H --> I
+    I -- oui --> J --> K
+    I -- non --> K
+    K --> L --> M
+
+    B -. erreur .-> X
+    C -. erreur .-> X
+    D -. erreur .-> X
+    G -. erreur .-> X
+    J -. erreur .-> X
+    K -. erreur .-> X
+`}
+/>
+
+Pas de rollback automatique : si une phase plante, ce qui a déjà été appliqué reste. Le dashboard montre exactement où ça s'est arrêté.
+
+---
+
+## Les défis : ce qui a pris le plus de temps
+
+### 1. La whitelist SSH d'O2switch
+
+Premier deploy en prod. Le rsync échoue avec :
+
+```
+ssh: connect to host coXXXX.odns.fr port 22: Network is unreachable
+```
+
+Surprise. SSH marche depuis ma machine perso, mais pas depuis cookie-server. O2switch utilise **ConfigServer Firewall** et bloque par défaut les IPs inconnues sur le port 22. Pas d'erreur claire, juste un timeout déguisé en "network unreachable".
+
+**Fix** : aller dans cPanel → Sécurité → ConfigServer Firewall, ajouter l'IP publique de cookie-server à la whitelist permanente.
+
+**Leçon** : noter ce genre de pré-requis dans le `CLAUDE.md` du projet, parce que dans 6 mois si l'IP change, je vais re-perdre 30 minutes à debugger.
+
+### 2. cPanel UAPI qui manque `list_subdomains`
+
+Quand on crée une app Node sur O2switch, il faut :
+1. Vérifier que le subdomain existe (ou le créer).
+2. Créer l'app Passenger associée.
+3. Pointer le DocumentRoot.
+
+Logique. Sauf que l'UAPI d'O2switch n'expose **pas** `SubDomain/list_subdomains`. Tu peux créer un subdomain, le supprimer, mais pas lister. Au lieu de ça, il faut utiliser `DomainInfo/list_domains` qui retourne **tous** les domaines (principal + addon + sub) et filtrer manuellement.
+
+```ts
+// packages/core/src/cpanel-client.ts (simplifié)
+const all = await uapi('DomainInfo', 'list_domains');
+const subdomains = all.sub_domains.filter(d => d.endsWith('.my-monkey.fr'));
+```
+
+Pas un blocker. Juste un rappel que les APIs cPanel sont… inégales. Toujours lire la doc avant d'assumer qu'une fonction existe.
+
+### 3. Le lockfile et le PID 1
+
+Pour éviter qu'un même repo déploie deux fois en parallèle (race condition sur le subdomain, rsync qui se piétine, etc.), j'ai un système de lock par repo : un fichier `data/locks/<repo>.lock` qui contient le PID du process qui tient le lock.
+
+```ts
+// acquire lock
+const lockfile = `${LOCK_DIR}/${repo}.lock`;
+if (existsSync(lockfile)) {
+  const pid = Number(readFileSync(lockfile, 'utf8'));
+  if (isProcessAlive(pid)) {
+    // someone else is deploying this repo, retry later
+    return false;
+  }
+  // stale lock, take it over
+}
+writeFileSync(lockfile, String(process.pid));
+```
+
+Logique. Marche très bien en local. Cassé en prod.
+
+**Le bug** : dans un container Docker, le process Node tourne en **PID 1**. Si tu reboot le container pendant un deploy en cours :
+
+1. Le container down. Le lockfile reste sur le volume (`/app/data/locks/myrepo.lock` contient `1`).
+2. Le container restart. Le nouveau Node tourne aussi en PID 1.
+3. Au prochain webhook, le code lit le lockfile, voit `PID=1`, fait `kill(1, 0)` pour tester si le process est vivant… et la réponse est OUI. Parce que oui, PID 1 existe — c'est *lui*, le nouveau process.
+4. Le code conclut : "un autre deploy tourne, j'attends". En boucle. Pour toujours.
+
+<Mermaid
+  caption="Le piège du PID 1 : après restart, le nouveau Node hérite du PID 1, donc le check « process vivant ? » répond toujours oui."
+  code={`
+sequenceDiagram
+    participant A as Container v1<br/>(PID 1)
+    participant L as Lockfile<br/>(volume persistant)
+    participant B as Container v2<br/>(PID 1 après restart)
+
+    A->>L: write "1"
+    Note over A: deploy en cours…
+    A--xA: docker restart
+    Note over L: contient toujours "1"
+    B->>L: read PID → 1
+    B->>B: kill(1, 0) → vivant ?
+    B-->>B: OUI (c'est moi-même)
+    Note over B: "un autre deploy tourne,<br/>j'attends 1s"
+    loop à l'infini
+        B->>L: re-test
+    end
+`}
+/>
+
+J'ai mis 40 minutes à comprendre. Le symptôme c'était `[queue] could not acquire lock for myrepo, retrying in 1s` qui spammait les logs sans jamais avancer.
+
+**Fix** : au boot du serveur, nettoyer tous les lockfiles. Si le serveur démarre, par définition il n'y a aucun deploy en cours.
+
+```ts
+// packages/server/src/index.ts:32-40
+for (const file of readdirSync(LOCK_DIR)) {
+  if (file.endsWith('.lock')) {
+    unlinkSync(`${LOCK_DIR}/${file}`);
+    console.log(`cleared stale lock ${file}`);
+  }
+}
+```
+
+Plus subtil : il faut aussi marquer comme `failed` dans Convex tous les deploys qui étaient `running` au moment du restart. Sinon ils restent affichés "en cours" dans le dashboard pour l'éternité.
+
+**Leçon** : les hypothèses qui marchent sur ta machine (PIDs uniques, processus utilisateur) ne tiennent plus dans un container. À chaque fois que tu touches à du PID-checking, demande-toi "est-ce que je tourne en PID 1 quelque part ?".
+
+### 4. Le tarball sans top-level dir
+
+Premier déploiement statique. Le site arrive sur le serveur, je vais sur l'URL : 404. Le rsync est dans les logs, vert. Le subdomain pointe au bon endroit. Mais le dossier `/home/coXXXX/monprojet.my-monkey.fr/` est… vide ?
+
+```bash
+$ tar tzf app.tgz
+index.html
+assets/main.js
+assets/style.css
+```
+
+Le tarball ne contient pas de dossier parent. Quand je faisais `tar xzf app.tgz --strip-components=1 -C target/`, ça strippait `index.html` (premier composant), `assets` (premier composant), etc. Bref, ça supprimait tout.
+
+**Fix** : toujours créer le tarball avec un dossier parent.
+
+```bash
+cd .. && tar czf /tmp/app.tgz monprojet/
+```
+
+J'ai aussi ajouté un check explicite côté serveur : si après extract il n'y a pas de fichier `.monkey` à la racine du dir extrait, on plante avec une erreur claire (`.monkey not found at <path>`) plutôt que de continuer avec un dossier vide.
+
+**Leçon** : les outils Unix font ce que tu leur demandes, pas ce que tu *voulais*. `--strip-components=1` strippe **toujours** 1 composant, peu importe que ce composant soit un fichier ou un dossier.
+
+### 5. Les migrations SQL idempotentes (et sécurisées)
+
+Pour les apps avec une DB, je voulais que les migrations SQL s'appliquent automatiquement post-deploy. C'est commun, mais le faire **proprement** demande un peu d'attention :
+
+- **Idempotent** : re-déployer la même release ne doit rien re-appliquer. → table `_monkey_migrations` qui tracke les filenames déjà exécutés.
+- **Ordré** : alphabétique sur les filenames. Le dev nomme `001_init.sql`, `002_users.sql`, etc.
+- **Sécurisé** : le password de la DB ne doit **jamais** apparaître dans `/proc/<pid>/cmdline`.
+
+Ce dernier point m'a fait râler. La doc MySQL conseille `mysql -u user -pPASSWORD db`. Mais `-pPASSWORD` apparaît dans la liste des process. Un autre user du shared hosting peut faire `ps -ef` et te piquer ton password.
+
+La bonne approche, c'est `mysql --defaults-extra-file=<path>` avec un fichier `.my.cnf` :
+
+```ini
+[client]
+user=coXXXX_madbuser
+password=...
+```
+
+Mais alors comment écrire ce fichier sans laisser de trace ? Solution :
+
+1. Sur le serveur monkey, je résous `creds_env: "MADB"` en `DB_MADB_USER` + `DB_MADB_PASS` depuis `.env.production`.
+2. Je crée un fichier temp côté O2switch via SSH : `mktemp ~/tmp/monkey-mig-XXXXXX.cnf`, avec `umask 077` pour qu'il soit chmod 600 dès la création.
+3. J'écrit les creds dedans, je lance toutes les migrations qui restent à appliquer.
+4. Dans un `finally`, `rm -f` le fichier — même si une migration plante.
+
+<Mermaid
+  caption="Flux des migrations : le fichier .my.cnf est créé en mode 600 et toujours nettoyé en finally, qu'une migration plante ou non."
+  code={`
+flowchart TD
+    Start([Phase migrations])
+    Resolve["Résoudre <code>creds_env=MADB</code><br/>→ <code>DB_MADB_USER</code> + <code>DB_MADB_PASS</code>"]
+    Mktemp["SSH: <code>umask 077 && mktemp ~/tmp/monkey-mig-XXXXXX.cnf</code>"]
+    Write["SSH: écrire <code>.my.cnf</code><br/><i>chmod 600 garanti par umask</i>"]
+    List["SSH: <code>ls migrations/*.sql | sort</code>"]
+    Track["Bootstrap <code>_monkey_migrations</code><br/>+ SELECT déjà appliqués"]
+    Loop{Migration<br/>en attente ?}
+    Apply["<code>mysql --defaults-extra-file=cnf db < file.sql</code>"]
+    Mark["<code>INSERT INTO _monkey_migrations</code>"]
+    Cleanup["SSH: <code>rm -f cnf</code><br/><i>finally — exécuté même si erreur</i>"]
+    Done([Phase OK])
+    Fail([Phase failed])
+
+    Start --> Resolve --> Mktemp --> Write --> List --> Track --> Loop
+    Loop -- oui --> Apply
+    Apply -- OK --> Mark --> Loop
+    Apply -- erreur --> Cleanup -.-> Fail
+    Loop -- non --> Cleanup --> Done
+`}
+/>
+
+```ts
+// packages/core/src/migrations.ts (simplifié)
+const cnf = await ssh(`umask 077 && mktemp ~/tmp/monkey-mig-XXXXXX.cnf`);
+try {
+  await ssh(`cat > ${cnf} <<'EOF'\n[client]\nuser=${user}\npassword=${pw}\nEOF`);
+  for (const file of pending) {
+    await ssh(`mysql --defaults-extra-file=${cnf} ${db} < ${file}`);
+    await ssh(`mysql --defaults-extra-file=${cnf} ${db} -e "INSERT INTO _monkey_migrations(filename) VALUES('${file}')"`);
+  }
+} finally {
+  await ssh(`rm -f ${cnf}`);
+}
+```
+
+Petite subtilité : je valide les filenames côté serveur avec `^[A-Za-z0-9_.-]+\.sql$`. Sans ça, un dev malicieux (ou simplement maladroit) pourrait nommer un fichier `; rm -rf ~ #.sql` et tout exploser à l'`INSERT INTO`.
+
+**Leçon** : à chaque fois que tu écris une chaîne dans une commande shell, demande-toi *d'où vient cette chaîne*. Si elle vient d'un input externe (filename, env var, body HTTP), tu dois la valider ou l'échapper. C'est de l'injection shell, OWASP top 10 année après année.
+
+### 6. Convex self-hosted pour le realtime
+
+J'avais d'abord prévu SQLite + Server-Sent Events pour le dashboard live. Ça aurait marché. Mais j'avais Convex en tête depuis longtemps et je voulais essayer la version self-hosted.
+
+Résultat : le dashboard Next.js consomme les queries Convex via le SDK normal, et l'UI se met à jour en temps réel quand un deploy change de phase. **Zéro code SSE à écrire**. Le worker fait juste :
+
+```ts
+await convex.mutation('deploys:setPhase', { id, phase: 'rsync' });
+```
+
+Et tous les clients abonnés à `deploys:get` voient le changement instantanément.
+
+Le coût : faire tourner un container Convex backend en plus, plus un Caddy block pour exposer `convex.cookie` en Tailscale. Acceptable.
+
+Un piège que j'ai rencontré : sur Convex self-hosted, **il faut explicitement `convex deploy`** les fonctions vers le backend. Sur Convex hosted, c'est intégré au CLI. Sur self-hosted, j'ai dû le faire à la main avec :
+
+```bash
+docker run --rm --network infra_monkey -v /home/maxim/monkey:/work -w /work \
+  node:22-alpine sh -c "./node_modules/.bin/convex deploy \
+    --url http://convex-backend:3210 \
+    --admin-key '<key>' -y"
+```
+
+Faute de quoi tu te retrouves avec des erreurs `Could not find public function for 'deploys:markOrphaned'` en runtime.
+
+---
+
+## Décisions de design que je ne regrette pas
+
+### Pas de build côté serveur
+
+Le tarball uploadé est **déjà bâti**. Le dev fait `npm run build && tar czf …` localement. Le serveur ne touche pas à pnpm/npm/yarn. Avantages :
+
+- Pas de surface d'attaque "exécuter du JS arbitraire post-`npm install`".
+- Pas de souci de version de Node sur le serveur monkey (le serveur n'exécute jamais le code des projets).
+- Le tarball est reproductible. Si ça marche en local, ça marche en prod.
+
+Le coût, c'est que les builds prennent place sur la machine du dev. Pour moi qui suis le seul dev, c'est OK.
+
+### Lock par repo, queue mémoire
+
+Deux déploiements pour des **repos différents** tournent en parallèle. Deux déploiements pour le **même** repo sont sérialisés via le lockfile. La queue vit en mémoire (pas de Redis, pas de RabbitMQ). Si le serveur crash, on perd la queue, mais on re-publie la release et ça repart.
+
+Simple. Suffisant pour mon volume (~10 déploiements par semaine).
+
+### `gh release create` comme déclencheur, pas `git push`
+
+Au début j'hésitais entre webhook `push` (chaque commit déploie) ou webhook `release` (déploie sur tag explicite). J'ai choisi `release` parce que :
+
+- Ça force à incrémenter un numéro de version. Bien pour le retour en arrière.
+- Ça filtre naturellement les WIP. Pas tous les commits méritent un déploiement.
+- L'artifact `app.tgz` est versionné dans la release. Je peux rollback en re-trigger une release antérieure.
+
+J'utilise spécifiquement le filtre `action === 'published' || action === 'released'`. Pas `created` ni `edited`. Si tu créés un draft puis tu cliques "Publish", c'est `published` qui fire. C'est l'API GitHub qui veut ça.
+
+### Pas de rollback automatique
+
+Si une migration SQL échoue à mi-chemin, les migrations précédentes restent appliquées. Pas de transaction globale. C'est volontaire : la plupart des migrations SQL ne sont pas transactionnelles (DDL implicite commit). Mieux vaut savoir où on en est plutôt que de faire semblant qu'on a rollback.
+
+Pour rollback, je re-publie une release antérieure. C'est pénible mais explicite. Mon volume ne justifie pas plus.
+
+---
+
+## Ce que je ferais différemment
+
+- **Health checks post-deploy**. Aujourd'hui le worker dit "success" dès que le rsync est OK. Mais le site peut être 500 à cause d'un bug. Ajouter un curl sur `/healthz` côté projet déployé, avec retry exponentiel sur 60s, validerait vraiment le déploiement.
+- **Métriques**. Combien de deploys par jour, par repo, par durée moyenne ? Aujourd'hui je vois ça en queryant Convex à la main. Une page `/stats` simple ferait gagner du temps.
+- **Webhook GitHub par repo, pas org**. Aujourd'hui c'est un webhook org-level. Pratique parce que pas de config par repo. Mais ça veut dire que **tout** événement GitHub de l'org arrive sur mon endpoint et est filtré. Si l'org grossit, ça peut générer du bruit inutile. À reconsidérer.
+- **Tests d'intégration end-to-end**. J'ai des tests unitaires sur `packages/core` et `packages/server`, avec mocks. Mais rien qui valide "le webhook part, le tarball arrive, le site est UP". À faire avec un O2switch staging si je m'embête.
+
+---
+
+## Stack résumée
+
+| Composant | Choix | Pourquoi |
+|---|---|---|
+| Webhook receiver | Express + crypto HMAC | minimal, maitrisé |
+| Queue | mémoire + lockfile | suffisant, pas de dépendance externe |
+| Historique + realtime | Convex self-hosted | abonnements gratuits côté UI |
+| Dashboard | Next.js 15 | je connais bien |
+| Reverse proxy | Caddy | TLS auto sur Tailscale, configuration courte |
+| Tunnel | Cloudflare Tunnel | pas d'ouverture de port côté cookie-server |
+| Cible deploy | O2switch (cPanel UAPI + rsync) | hébergement payé déjà là |
+| Notifs | ntfy (optionnel) | push sur mobile, zero-setup |
+
+---
+
+## En conclusion
+
+monkey, c'est ~3000 lignes de TypeScript, 50 tests, un docker-compose, et 2 mois d'utilisation quotidienne. Ça fait exactement ce dont j'ai besoin et rien de plus.
+
+Le plus gros enseignement : **les défis d'un projet "petit DevOps maison" ne sont pas dans l'algorithme, ils sont dans les frontières**. La frontière avec O2switch (firewall, UAPI lacunaire), la frontière avec Docker (PID 1), la frontière avec le shell (injection), la frontière avec GitHub (filter sur l'action). C'est là que tu te prends les murs, parce que c'est là qu'on ne contrôle qu'un côté.
+
+Donc si tu construis ton propre pipeline de déploiement un jour : commence par lister les frontières. Pour chacune, demande-toi ce qui peut mal se passer côté *eux*. Tu gagneras du temps.
+
+---
+
+*Code : [github.com/my-monkeys/o2switch-mcp](https://github.com/my-monkeys/o2switch-mcp). Dashboard : `monkey.cookie` (Tailscale only).*
