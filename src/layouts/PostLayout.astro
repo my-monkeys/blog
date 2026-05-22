@@ -1,0 +1,124 @@
+---
+import type { CollectionEntry } from 'astro:content';
+import type { MarkdownHeading } from 'astro';
+import { Image } from 'astro:assets';
+import BaseLayout from './BaseLayout.astro';
+import TypeBadge from '@/components/TypeBadge.astro';
+import ProjectBadge from '@/components/ProjectBadge.astro';
+import TagPill from '@/components/TagPill.astro';
+import TableOfContents from '@/components/TableOfContents.astro';
+import { readingTimeMinutes } from '@/lib/readingTime.js';
+
+export interface Props {
+  post: CollectionEntry<'posts'>;
+  headings: MarkdownHeading[];
+}
+const { post, headings } = Astro.props;
+const d = post.data;
+const minutes = readingTimeMinutes(post.body);
+const date = d.date.toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+
+const sourceFile = `https://github.com/my-monkeys/blog/blob/main/src/content/posts/${post.id}`;
+const ogImage = `/og/${post.slug}.png`;
+---
+
+<BaseLayout title={`${d.title} — Blog My-Monkey`} description={d.excerpt} ogImage={ogImage} noIndex={d.draft}>
+  <article class="post">
+    <header class="post-header">
+      <div class="post-meta">
+        <span class="meta">{date}</span>
+        <span class="meta-sep">·</span>
+        <TypeBadge type={d.type} />
+        {d.project && <ProjectBadge slug={d.project} />}
+      </div>
+      <h1 class="post-title">{d.title}</h1>
+      {d.excerpt && <p class="post-deck">{d.excerpt}</p>}
+    </header>
+
+    {d.cover && (
+      <div class="post-cover">
+        <Image src={d.cover} alt="" widths={[600, 1000, 1400]} sizes="100vw" />
+      </div>
+    )}
+
+    <div class="post-grid">
+      <aside class="post-aside">
+        <TableOfContents headings={headings} />
+      </aside>
+      <div class="prose post-body">
+        <slot />
+      </div>
+    </div>
+
+    <footer class="post-footer">
+      <div class="post-tags">
+        {d.tags.map((t) => <TagPill tag={t} />)}
+      </div>
+      <div class="post-foot-links">
+        <a href={sourceFile} rel="external">Édité sur GitHub ↗</a>
+        {d.source_url && <a href={d.source_url} rel="external">Voir la release ↗</a>}
+        <span> · </span>
+        <a href="/rss.xml">RSS</a>
+      </div>
+      <a href="/" class="post-back">← Tous les posts</a>
+    </footer>
+  </article>
+</BaseLayout>
+
+<style>
+  .post { padding-top: 2rem; padding-bottom: 4rem; }
+  .post-header { margin-bottom: 2rem; }
+  .post-meta {
+    display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+  }
+  .meta-sep { color: var(--ink-soft); }
+  .post-deck {
+    font-family: var(--font-body);
+    font-style: italic;
+    font-size: 1.25rem;
+    color: var(--ink-soft);
+    margin-top: 1rem;
+    max-width: 50ch;
+  }
+  .post-cover {
+    margin: 2rem 0;
+    border: 3px solid var(--ink);
+    box-shadow: var(--shadow-hard);
+  }
+  .post-cover img { width: 100%; height: auto; display: block; }
+  .post-grid {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 3rem;
+    align-items: start;
+  }
+  .post-aside { position: sticky; top: 2rem; }
+  @media (max-width: 1024px) {
+    .post-grid { grid-template-columns: 1fr; }
+    .post-aside { display: none; }
+  }
+  .post-footer {
+    margin-top: 4rem;
+    padding-top: 2rem;
+    border-top: 2px solid var(--ink);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  .post-tags { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .post-foot-links {
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    color: var(--ink-soft);
+  }
+  .post-foot-links a { text-decoration: underline; }
+  .post-foot-links a:hover { color: var(--accent); }
+  .post-back {
+    font-family: var(--font-ui);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-size: 0.875rem;
+  }
+</style>
