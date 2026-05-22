@@ -48,6 +48,16 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
       import '@/scripts/animations.ts';
       import '@/scripts/image-lightbox.ts';
     </script>
+    <script is:inline>
+      // Register the Workbox-generated service worker (offline support).
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker
+            .register('/sw.js', { scope: '/' })
+            .catch((err) => console.error('[sw] register failed:', err));
+        });
+      }
+    </script>
   </head>
   <body>
     <header class="page nav">
