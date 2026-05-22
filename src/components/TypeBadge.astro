@@ -1,0 +1,43 @@
+---
+export interface Props {
+  type: 'article' | 'update' | 'post-mortem' | 'link';
+  version?: string;
+}
+const { type, version } = Astro.props;
+
+const LABEL: Record<Props['type'], string> = {
+  article: 'article',
+  update: 'update',
+  'post-mortem': 'post-mortem',
+  link: 'lien',
+};
+---
+
+<span class:list={['type-badge', `type-${type}`]}>
+  {LABEL[type]}
+  {version && <span class="version">{version}</span>}
+</span>
+
+<style>
+  .type-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 0.2rem 0.5rem;
+    border: 2px solid var(--ink);
+    line-height: 1;
+  }
+  .type-update { background: var(--ok); color: #0E0E10; }
+  .type-post-mortem { background: var(--alert); color: #0E0E10; }
+  .type-link { background: var(--info); color: #F5EFE0; }
+  .type-article { background: transparent; }
+  .version {
+    font-family: var(--font-mono);
+    font-weight: 500;
+  }
+</style>

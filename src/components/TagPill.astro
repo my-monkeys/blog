@@ -1,0 +1,18 @@
+---
+export interface Props {
+  tag: string;
+}
+const { tag } = Astro.props;
+---
+
+<a href={`/tags/${tag}`} class="tag-pill">#{tag}</a>
+
+<style>
+  .tag-pill {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+  }
+  .tag-pill:hover { color: var(--accent); }
+</style>
