@@ -1,0 +1,38 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import PostRow from '@/components/PostRow.astro';
+
+export async function getStaticPaths() {
+  const all = await getCollection('posts', ({ data }) => !(import.meta.env.PROD && data.draft));
+  const years = new Map<string, typeof all>();
+  for (const post of all) {
+    const year = String(post.data.date.getFullYear());
+    if (!years.has(year)) years.set(year, []);
+    years.get(year)!.push(post);
+  }
+  return Array.from(years.entries()).map(([year, posts]) => ({
+    params: { year },
+    props: { year, posts: posts.sort((a, b) => b.data.date.getTime() - a.data.date.getTime()) },
+  }));
+}
+
+const { year, posts } = Astro.props;
+---
+
+<BaseLayout title={`${year} — Blog My-Monkey`}>
+  <section class="archive-head">
+    <p class="meta">Archive</p>
+    <h1 class="post-title">{year}</h1>
+    <p class="meta">{posts.length} post{posts.length > 1 ? 's' : ''}</p>
+  </section>
+  <section class="feed">
+    {posts.map((post) => <PostRow post={post} />)}
+  </section>
+</BaseLayout>
+
+<style>
+  .archive-head { padding: 3rem 0 2rem; }
+  .archive-head .meta { margin-bottom: 0.5rem; }
+  .feed { padding-bottom: 4rem; }
+</style>
