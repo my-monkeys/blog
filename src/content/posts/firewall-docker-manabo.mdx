@@ -9,11 +9,25 @@ draft: false
 ---
 
 import Mortem from '@/components/Mortem.astro';
+import Mermaid from '@/components/Mermaid.astro';
 
 <Mortem
   symptom="manabo.cookie répond systématiquement 502 Bad Gateway. Le container manabo lui-même tourne et répond bien sur localhost:3456 depuis l'hôte. Caddy log : 'dial tcp 172.17.0.1:3456: i/o timeout'."
   cause="Caddy (en container Docker) atteint l'hôte via host.docker.internal qui résout vers 172.17.0.1. Mais UFW est en default deny et bloque les paquets venant du range Docker (172.16.0.0/12)."
   fix="sudo ufw allow from 172.16.0.0/12 to any port 3456 proto tcp comment 'manabo from Docker'"
+/>
+
+<Mermaid
+  caption="Chemin réseau avant le fix : UFW droppe silencieusement les paquets Caddy → host"
+  code={`
+flowchart LR
+  Client(["Client<br/>browser"]) -->|HTTPS| Caddy["Caddy<br/>container Docker"]
+  Caddy -->|"host.docker.internal:3456<br/>(172.17.0.1)"| UFW{{"UFW<br/>default deny"}}
+  UFW -.->|"❌ DROP<br/>(aucune règle)"| X[/timeout/]
+  UFW ==>|"✅ allow 172.16/12<br/>(après fix)"| Manabo["manabo<br/>host service :3456"]
+  style X fill:#FF5E78,color:#0E0E10
+  style Manabo fill:#2ECC71,color:#0E0E10
+`}
 />
 
 ## Le symptôme

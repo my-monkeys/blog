@@ -249,6 +249,41 @@ import ProjectCard from '@/components/ProjectCard.astro';
 ```
 Le slug doit matcher `src/data/projects.ts`. Si inconnu : fallback texte sans lien + warning au build.
 
+**`<Mermaid>`** — diagramme Mermaid, rendu **client-side** (lazy import, mermaid n'est téléchargé que sur les pages qui en contiennent) :
+
+```mdx
+import Mermaid from '@/components/Mermaid.astro';
+
+<Mermaid code={`
+graph LR
+  A[Client] -->|HTTPS| B(Caddy)
+  B --> C{Service}
+  C -->|OK| D[Response]
+  C -->|fail| E[502]
+`} />
+```
+
+Avec une légende :
+
+```mdx
+<Mermaid
+  caption="Flow réseau du proxy Caddy"
+  code={`
+sequenceDiagram
+  Client->>Caddy: GET /
+  Caddy->>App: proxy_pass
+  App-->>Caddy: 200
+  Caddy-->>Client: 200
+`}
+/>
+```
+
+Supporte tous les types de diagrammes Mermaid : `graph`, `sequenceDiagram`, `classDiagram`, `stateDiagram`, `erDiagram`, `gantt`, `pie`, `journey`, `gitGraph`, etc. Voir https://mermaid.js.org/intro/.
+
+Theme auto-adapté au mode light/dark **au premier rendu** (pas dynamique si on toggle après — recharger la page pour reformatter).
+
+Si le diagramme contient une erreur de syntaxe, le bloc affiche un cadre rouge avec "Mermaid render failed (voir console)" — pratique pour debug.
+
 ### 5. Ajouter des images
 
 #### Image inline dans un article
