@@ -1,0 +1,89 @@
+---
+import '@/styles/global.css';
+import '@/styles/code.css';
+import ThemeToggle from '@/components/ThemeToggle.astro';
+import { ClientRouter } from 'astro:transitions';
+
+export interface Props {
+  title: string;
+  description?: string;
+  ogImage?: string;
+  noIndex?: boolean;
+}
+
+const {
+  title,
+  description = "Carnet de bord d'une galaxie de projets perso.",
+  ogImage = '/og-default.png',
+  noIndex = false,
+} = Astro.props;
+
+const canonical = new URL(Astro.url.pathname, Astro.site).toString();
+---
+
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    {noIndex && <meta name="robots" content="noindex" />}
+    <link rel="canonical" href={canonical} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={new URL(ogImage, Astro.site).toString()} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="alternate" type="application/rss+xml" title="Blog My-Monkey" href="/rss.xml" />
+    <ClientRouter />
+  </head>
+  <body>
+    <header class="page nav">
+      <a href="https://my-monkey.fr" class="nav-back">← MY-MONKEY</a>
+      <nav class="nav-links">
+        <a href="/">Blog</a>
+        <a href="/search">Search</a>
+        <a href="/now">Now</a>
+        <a href="/about">About</a>
+        <a href="/rss.xml">RSS</a>
+      </nav>
+      <ThemeToggle />
+    </header>
+    <main class="page">
+      <slot />
+    </main>
+    <footer class="page footer">
+      <p>blog.my-monkey.fr · <a href="https://my-monkey.fr">my-monkey.fr</a></p>
+    </footer>
+
+    <style>
+      .nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1.5rem;
+        padding-top: 1.25rem;
+        padding-bottom: 1.25rem;
+        flex-wrap: wrap;
+        font-family: var(--font-ui);
+        font-size: 0.875rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .nav-back { font-weight: 600; }
+      .nav-links { display: flex; gap: 1.25rem; flex-wrap: wrap; }
+      .nav-links a:hover { color: var(--accent); }
+      .footer {
+        margin-top: 6rem;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        border-top: 2px solid var(--ink);
+        font-size: 0.875rem;
+        color: var(--ink-soft);
+      }
+    </style>
+  </body>
+</html>
