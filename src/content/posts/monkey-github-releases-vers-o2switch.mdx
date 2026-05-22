@@ -9,6 +9,8 @@ draft: false
 ---
 
 import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+import Callout from '@/components/Callout.astro';
 
 Pendant longtemps, déployer un projet de mon monorepo `my-monkey/` ressemblait à ça :
 
@@ -119,6 +121,35 @@ flowchart LR
 />
 
 À droite, le dev n'a plus rien d'autre à faire que `gh release create`. Tout le reste est observable et persistant.
+
+Et côté config, le format `.monkey` s'est resserré aussi — exit le shell exécuté en local, place aux blocs déclaratifs :
+
+<CodeDiff
+  lang="jsonc"
+  beforeLabel="v1 — o2monk"
+  afterLabel="v2 — monkey"
+  caption=".monkey : trois champs sortis (exécution shell côté CLI), trois entrés (préprod, migrations, registry public)"
+  before={`{
+  "target": "...",
+  "source": "./",
+  "exclude": ["node_modules", ".env", ".git"],
+  "nodejs_app": "...",
+  "setup": { "nodejs_version": "...", "startup_file": "..." },
+  "build_command": "npm run build",
+  "htaccess_rules": ["..."],
+  "post_deploy": "touch tmp/restart.txt"
+}`}
+  after={`{
+  "target": "monprojet.my-monkey.fr",
+  "preprod_target": "preprod.monprojet.my-monkey.fr",
+  "source": "./dist/",
+  "nodejs_app": "monprojet-api",
+  "setup": { "nodejs_version": "22.17.0", "startup_file": "server.js" },
+  "post_deploy": "touch tmp/restart.txt",
+  "migrations": { "type": "mysql", "db": "...", "creds_env": "MADB" },
+  "site": { "title": "Mon projet", "category": "tool" }
+}`}
+/>
 
 ---
 
@@ -241,7 +272,9 @@ Surprise. SSH marche depuis ma machine perso, mais pas depuis cookie-server. O2s
 
 **Fix** : aller dans cPanel → Sécurité → ConfigServer Firewall, ajouter l'IP publique de cookie-server à la whitelist permanente.
 
-**Leçon** : noter ce genre de pré-requis dans le `CLAUDE.md` du projet, parce que dans 6 mois si l'IP change, je vais re-perdre 30 minutes à debugger.
+<Callout type="fix" label="Leçon">
+Noter ce genre de pré-requis dans le `CLAUDE.md` du projet, parce que dans 6 mois si l'IP change, je vais re-perdre 30 minutes à debugger.
+</Callout>
 
 ### 2. cPanel UAPI qui manque `list_subdomains`
 
@@ -325,7 +358,9 @@ for (const file of readdirSync(LOCK_DIR)) {
 
 Plus subtil : il faut aussi marquer comme `failed` dans Convex tous les deploys qui étaient `running` au moment du restart. Sinon ils restent affichés "en cours" dans le dashboard pour l'éternité.
 
-**Leçon** : les hypothèses qui marchent sur ta machine (PIDs uniques, processus utilisateur) ne tiennent plus dans un container. À chaque fois que tu touches à du PID-checking, demande-toi "est-ce que je tourne en PID 1 quelque part ?".
+<Callout type="fix" label="Leçon">
+Les hypothèses qui marchent sur ta machine (PIDs uniques, processus utilisateur) ne tiennent plus dans un container. À chaque fois que tu touches à du PID-checking, demande-toi "est-ce que je tourne en PID 1 quelque part ?".
+</Callout>
 
 ### 4. Le tarball sans top-level dir
 
@@ -348,7 +383,9 @@ cd .. && tar czf /tmp/app.tgz monprojet/
 
 J'ai aussi ajouté un check explicite côté serveur : si après extract il n'y a pas de fichier `.monkey` à la racine du dir extrait, on plante avec une erreur claire (`.monkey not found at <path>`) plutôt que de continuer avec un dossier vide.
 
-**Leçon** : les outils Unix font ce que tu leur demandes, pas ce que tu *voulais*. `--strip-components=1` strippe **toujours** 1 composant, peu importe que ce composant soit un fichier ou un dossier.
+<Callout type="fix" label="Leçon">
+Les outils Unix font ce que tu leur demandes, pas ce que tu *voulais*. `--strip-components=1` strippe **toujours** 1 composant, peu importe que ce composant soit un fichier ou un dossier.
+</Callout>
 
 ### 5. Les migrations SQL idempotentes (et sécurisées)
 
@@ -416,7 +453,9 @@ try {
 
 Petite subtilité : je valide les filenames côté serveur avec `^[A-Za-z0-9_.-]+\.sql$`. Sans ça, un dev malicieux (ou simplement maladroit) pourrait nommer un fichier `; rm -rf ~ #.sql` et tout exploser à l'`INSERT INTO`.
 
-**Leçon** : à chaque fois que tu écris une chaîne dans une commande shell, demande-toi *d'où vient cette chaîne*. Si elle vient d'un input externe (filename, env var, body HTTP), tu dois la valider ou l'échapper. C'est de l'injection shell, OWASP top 10 année après année.
+<Callout type="warn" label="Leçon — sécurité">
+À chaque fois que tu écris une chaîne dans une commande shell, demande-toi *d'où vient cette chaîne*. Si elle vient d'un input externe (filename, env var, body HTTP), tu dois la valider ou l'échapper. C'est de l'injection shell, OWASP top 10 année après année.
+</Callout>
 
 ### 6. Convex self-hosted pour le realtime
 

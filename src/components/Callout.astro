@@ -1,13 +1,15 @@
 ---
 export interface Props {
   type?: 'info' | 'warn' | 'fix';
+  label?: string;
 }
-const { type = 'info' } = Astro.props;
-const LABEL = { info: 'Note', warn: 'Attention', fix: 'Fix' };
+const { type = 'info', label } = Astro.props;
+const DEFAULT_LABEL = { info: 'Note', warn: 'Attention', fix: 'Fix' };
+const finalLabel = label ?? DEFAULT_LABEL[type];
 ---
 
 <aside class:list={['callout', `callout-${type}`]}>
-  <div class="callout-label">{LABEL[type]}</div>
+  <div class="callout-label">{finalLabel}</div>
   <div class="callout-body"><slot /></div>
 </aside>
 
