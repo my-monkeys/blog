@@ -1,0 +1,6 @@
+name = "decap-oauth"
+main = "src/index.ts"
+compatibility_date = "2026-05-22"
+
+# Domain mapped via Cloudflare Dashboard → Worker → Custom Domains
+# After deploy: add custom domain `decap-oauth.my-monkey.fr`
