@@ -1,0 +1,34 @@
+---
+export interface Props {
+  type?: 'info' | 'warn' | 'fix';
+}
+const { type = 'info' } = Astro.props;
+const LABEL = { info: 'Note', warn: 'Attention', fix: 'Fix' };
+---
+
+<aside class:list={['callout', `callout-${type}`]}>
+  <div class="callout-label">{LABEL[type]}</div>
+  <div class="callout-body"><slot /></div>
+</aside>
+
+<style>
+  .callout {
+    margin: 1.75em 0;
+    padding: 1rem 1.25rem;
+    border-left: 4px solid var(--ink);
+    background: var(--bg-elev);
+  }
+  .callout-info { border-left-color: var(--info); }
+  .callout-warn { border-left-color: var(--alert); }
+  .callout-fix { border-left-color: var(--ok); }
+  .callout-label {
+    font-family: var(--font-ui);
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.4rem;
+    color: var(--ink-soft);
+  }
+  .callout-body :global(p:last-child) { margin-bottom: 0; }
+</style>

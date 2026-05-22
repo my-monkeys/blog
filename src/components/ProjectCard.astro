@@ -1,0 +1,52 @@
+---
+import { getProject } from '@/data/projects.js';
+
+export interface Props { slug: string; }
+const { slug } = Astro.props;
+const project = getProject(slug);
+---
+
+{project ? (
+  <a href={project.url} class="project-card" rel="external">
+    <div class="project-card-label">PROJET LIÉ</div>
+    <div class="project-card-name">{project.name}</div>
+    <div class="project-card-url">{project.url.replace('https://', '')}</div>
+  </a>
+) : (
+  <div class="project-card inactive">
+    <div class="project-card-name">{slug}</div>
+    <div class="project-card-url">(projet inconnu)</div>
+  </div>
+)}
+
+<style>
+  .project-card {
+    display: block;
+    margin: 1.75em 0;
+    padding: 1.25rem;
+    border: 2px solid var(--ink);
+    background: var(--bg-elev);
+  }
+  .project-card:hover { background: var(--ink); color: var(--bg); }
+  .project-card-label {
+    font-family: var(--font-ui);
+    font-weight: 700;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+  }
+  .project-card-name {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1.25rem;
+    margin-top: 0.25rem;
+  }
+  .project-card-url {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    margin-top: 0.25rem;
+    color: var(--ink-soft);
+  }
+  .project-card:hover .project-card-url { color: var(--bg); opacity: 0.8; }
+</style>

@@ -1,0 +1,50 @@
+---
+export interface Props {
+  symptom: string;
+  cause: string;
+  fix: string;
+}
+const { symptom, cause, fix } = Astro.props;
+---
+
+<div class="mortem">
+  <div class="mortem-cell">
+    <div class="mortem-label">Symptôme</div>
+    <p>{symptom}</p>
+  </div>
+  <div class="mortem-cell">
+    <div class="mortem-label">Cause</div>
+    <p>{cause}</p>
+  </div>
+  <div class="mortem-cell">
+    <div class="mortem-label">Fix</div>
+    <p>{fix}</p>
+  </div>
+</div>
+
+<style>
+  .mortem {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border: 2px solid var(--ink);
+    margin: 2em 0;
+  }
+  .mortem-cell { padding: 1.25rem; border-right: 2px solid var(--ink); background: var(--bg-elev); }
+  .mortem-cell:last-child { border-right: 0; }
+  .mortem-cell p { font-family: var(--font-body); font-size: 1rem; }
+  .mortem-label {
+    font-family: var(--font-ui);
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.5rem;
+    color: var(--ink-soft);
+  }
+  @media (max-width: 720px) {
+    .mortem { grid-template-columns: 1fr; }
+    .mortem-cell { border-right: 0; border-bottom: 2px solid var(--ink); }
+    .mortem-cell:last-child { border-bottom: 0; }
+  }
+</style>
