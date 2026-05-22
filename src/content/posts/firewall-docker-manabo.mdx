@@ -1,0 +1,131 @@
+---
+title: "Le firewall Docker qui cassait `manabo`"
+date: 2026-05-19
+type: post-mortem
+excerpt: "Pendant 3 jours, manabo.cookie renvoyait 502. La cause se cachait dans une règle UFW que je n'avais jamais regardée."
+tags: ["docker", "infra", "debug", "caddy", "ufw"]
+project: "manabo"
+draft: false
+---
+
+import Mortem from '@/components/Mortem.astro';
+
+<Mortem
+  symptom="manabo.cookie répond systématiquement 502 Bad Gateway. Le container manabo lui-même tourne et répond bien sur localhost:3456 depuis l'hôte. Caddy log : 'dial tcp 172.17.0.1:3456: i/o timeout'."
+  cause="Caddy (en container Docker) atteint l'hôte via host.docker.internal qui résout vers 172.17.0.1. Mais UFW est en default deny et bloque les paquets venant du range Docker (172.16.0.0/12)."
+  fix="sudo ufw allow from 172.16.0.0/12 to any port 3456 proto tcp comment 'manabo from Docker'"
+/>
+
+## Le symptôme
+
+Vendredi soir. Je remarque par hasard que `manabo.cookie` répond 502. Bizarre, j'avais rien touché.
+
+SSH sur `cookie-server`, premiers checks :
+
+```bash
+docker ps | grep manabo
+# manabo container — Up 23 days (healthy) ✓
+
+curl localhost:3456/health
+# {"status":"ok"} ✓
+
+curl http://manabo.cookie/health
+# (long timeout) ... 502 Bad Gateway ✗
+```
+
+Donc le service tourne. C'est Caddy qui n'arrive plus à l'atteindre.
+
+## L'enquête
+
+Logs Caddy :
+
+```bash
+docker logs caddy-1 --tail 20 | grep manabo
+# {"level":"error","msg":"dial tcp 172.17.0.1:3456: i/o timeout"}
+```
+
+`172.17.0.1` c'est l'IP de l'hôte vue depuis le réseau Docker (le `host.docker.internal` du Mac, version Linux). Caddy essaie de pousser la requête à l'hôte mais elle se perd.
+
+Le service écoute bien :
+
+```bash
+ss -tlnp | grep 3456
+# LISTEN 0 511 *:3456 *:* users:(("node",pid=...))
+```
+
+Sur `*:3456` donc accepte les connexions de partout. Le `node` qui écoute c'est bien `manabo` (vérifié avec `lsof -p`).
+
+Donc :
+- ✓ Le service écoute
+- ✓ Caddy envoie la requête vers la bonne IP/port
+- ✗ La requête ne revient jamais
+
+C'est un firewall qui bloque.
+
+## Le coupable
+
+```bash
+sudo ufw status verbose
+# Status: active
+# Default: deny (incoming), allow (outgoing), deny (routed)
+#
+# To                Action  From
+# --                ------  ----
+# 22/tcp            ALLOW   Anywhere
+# 80,443/tcp        ALLOW   Anywhere
+# (...)
+```
+
+UFW est en `default deny` côté incoming. Aucune règle ne couvre le port 3456 ni la range Docker.
+
+Les paquets de Caddy (qui arrivent sur `172.17.0.1:3456` depuis le sous-réseau Docker `172.17.0.0/16`) sont silencieusement droppés. D'où le timeout.
+
+Mais pourquoi ça marchait avant ? J'ai dû modifier UFW un soir sans m'en souvenir — probablement en faisant le ménage des règles obsolètes après une migration de service. J'ai dû supprimer une règle générique qui couvrait ce cas.
+
+## Le fix
+
+```bash
+sudo ufw allow from 172.16.0.0/12 to any port 3456 proto tcp \
+  comment 'manabo from Docker'
+sudo ufw reload
+```
+
+Pourquoi `172.16.0.0/12` et pas `172.17.0.0/16` ? Parce que Docker peut utiliser plusieurs ranges (`172.17.x`, `172.18.x`, etc. selon les networks créés). Le `/12` couvre toute la plage Docker conventionnelle (`172.16.0.0` à `172.31.255.255`).
+
+Curl de validation :
+
+```bash
+curl http://manabo.cookie/health
+# {"status":"ok"} ✓
+```
+
+3 jours d'indispo pour un service que peu de gens utilisent — pas catastrophique mais ça me fait râler.
+
+## La leçon
+
+À chaque fois qu'un service tourne **directement sur l'hôte** (pas dans un container Docker) et doit être atteint **depuis un container** (typiquement Caddy reverse-proxy), il faut :
+
+1. Que le service écoute sur `0.0.0.0` ou explicitement sur `172.17.0.1` (l'IP de l'hôte vue depuis Docker)
+2. Que UFW autorise le range Docker à atteindre ce port
+
+J'ai depuis ajouté un script qui ouvre automatiquement tous les ports host-direct utilisés par Caddy :
+
+```bash
+#!/usr/bin/env bash
+# /usr/local/bin/ufw-allow-docker-ports
+PORTS=$(docker exec caddy-1 cat /etc/caddy/Caddyfile \
+  | grep -oP 'host\.docker\.internal:\K\d+' \
+  | sort -u)
+
+for port in $PORTS; do
+  sudo ufw allow from 172.16.0.0/12 to any port $port proto tcp \
+    comment "caddy → host:$port" 2>/dev/null || true
+done
+sudo ufw reload
+```
+
+Lancé après chaque modif du `Caddyfile`. Si un jour j'ajoute un nouveau service host-direct, plus jamais de timeout silencieux.
+
+## TL;DR
+
+Si Caddy en container Docker timeout vers `host.docker.internal:XXXX` alors que le service tourne bien sur l'hôte → **regarde UFW avant tout**.

@@ -1,0 +1,78 @@
+---
+title: "Bienvenue dans My-Monkey"
+date: 2026-05-22
+type: article
+excerpt: "Une trentaine de projets perso, un serveur sous mon bureau, et un pipeline de déploiement qui tient sur un fichier JSON. Présentations."
+tags: ["meta", "stack", "infra"]
+project: "blog"
+draft: false
+---
+
+Si t'as cliqué sur un sous-domaine de `my-monkey.fr` un jour, t'es à la bonne adresse. Voici le contexte.
+
+## C'est quoi My-Monkey
+
+Un **collectif** de projets perso. Une galaxie d'apps, jeux, outils et conneries — accumulés depuis quelques années — tous hébergés sous `*.my-monkey.fr`.
+
+Y'a de tout :
+
+- des jeux idiots (Banana Clicker, Arcade, Chirurgien)
+- des outils utiles (Showroom, Asso, Movies, Uptime)
+- des sites un peu cons (Kebab Shit Map, Michto Scale)
+- des trucs un peu plus sérieux (Manabo, Piloo)
+- et des trucs qui ne rentrent dans aucune case (MapMap, MilkyLog, Monkey)
+
+Une trentaine au total. Tous codés à la main.
+
+## La philo
+
+Pas de roadmap business. Pas d'objectif de scale. Le but c'est :
+
+- **apprendre** des stacks en les utilisant pour de vrai (pas en suivant un tuto)
+- **avoir des trucs à montrer** quand on me demande "tu fais quoi en ce moment"
+- **garder l'habitude** d'écrire du code propre, même sur des projets jetables
+- **m'amuser** — beaucoup de ces projets n'ont aucune raison d'exister, et c'est bien comme ça
+
+## Le stack
+
+Y'a pas UN stack. Chaque sous-projet a le sien, choisi en fonction du besoin :
+
+| Stack | Projets typiques |
+|---|---|
+| **Next.js 14/15 + Supabase** | Manabo, Fapmap, Kebab, Porndle, Geography, Showroom |
+| **Astro 5** | Ce blog (et plus à venir) |
+| **Vite + React** | Asso, Chirurgien, Banana Clicker, Alloc Warrior |
+| **HTML/CSS/JS statique** | Arcade, Monkey, MapMap |
+| **Flutter** | Piloo (l'app mobile) |
+| **Express + PostgreSQL** | MilkyLog, Support |
+
+Pas de monorepo formel. Juste un dossier `my-monkey/` sur mon disque avec un sous-dossier par projet, chacun avec son `package.json`, son `CLAUDE.md`, son `.monkey`.
+
+## L'infra
+
+Deux pieds :
+
+1. **O2switch** — shared hosting pour la majorité des sites statiques + petites APIs Node (~25 projets)
+2. **Cookie-server** — un Ubuntu chez moi, accessible via Tailscale, qui héberge Pterodactyl (serveurs Minecraft), une médiathèque Jellyfin, n8n, ComfyUI, et tout ce qui ne pourrait pas tourner sur du shared hosting
+
+Pas de Kubernetes, pas de Vercel, pas d'AWS. C'est pas un manifeste anti-cloud — c'est juste que pour 30 projets perso sans trafic, le ratio prix/complexité de ces solutions est mauvais.
+
+## Le pipeline de deploy
+
+L'élément central : un système maison que j'ai baptisé **monkey** (oui, original). En résumé : chaque projet a un fichier `.monkey` qui décrit où il va, comment il doit être servi, et ce qu'il faut faire après le déploiement. Je `gh release create`, et 60 secondes après c'est en ligne.
+
+J'écrirai un post dédié là-dessus — c'est suffisamment custom pour mériter sa propre page.
+
+## Ce que tu vas trouver ici
+
+Le blog que tu lis est lui-même un sous-projet de My-Monkey. Il sert à :
+
+- partager des **updates** quand un projet bouge (auto-générées depuis les releases GitHub)
+- archiver les **post-mortems** des trucs qui cassent en prod
+- noter les **tips techniques** qui méritent d'être retrouvables
+- partager des **liens** vers des articles que je trouve bien
+- garder à jour une page [/now](/now/) — ce sur quoi je bosse en ce moment
+
+Pas de calendrier éditorial. Pas de promesse de fréquence. Quand y'a un truc à raconter, j'écris. Quand y'a rien, je ferme le laptop.
+
+À bientôt sur `*.my-monkey.fr`.

@@ -1,0 +1,127 @@
+---
+title: "Le pipeline `.monkey` : déployer 25 projets sans CI/CD payante"
+date: 2026-05-21
+type: article
+excerpt: "Un fichier JSON, un webhook GitHub, un worker Node maison, un rsync. ~500 lignes de code et zéro vendor lock-in."
+tags: ["infra", "deploy", "github-actions", "node"]
+project: "blog"
+draft: false
+---
+
+J'ai une trentaine de projets perso à déployer. **Aucun** ne mérite une CI/CD complète Vercel/Netlify. Voici comment je m'en sors.
+
+## Le problème
+
+Mes options "standards" :
+
+- **Un Vercel par projet** → 30 abonnements à gérer, plafond gratuit qui saute vite, vendor lock-in sur le routing/build.
+- **Un Cloudflare Pages par projet** → mieux, mais même problème de duplication.
+- **GitHub Actions complète qui build et push** → faisable, mais ça résout pas le "où push" (faut quand même un endroit où rsync), et c'est 30× le même `.yml` à maintenir.
+
+Mon constat après quelques années : **90% de mes projets sont statiques ou Node simple** (Next.js standalone, Express). Pour ça, un rsync vers du shared hosting (O2switch chez moi) suffit largement.
+
+Donc j'ai écrit un service qui fait ça pour moi.
+
+## Anatomie d'un `.monkey`
+
+Chaque projet a un fichier `.monkey` à sa racine. Pour ce blog :
+
+```json
+{
+  "target": "blog.my-monkey.fr",
+  "source": "./dist/",
+  "setup": { "spa_routing": false },
+  "post_deploy": "curl ... IndexNow ...",
+  "site": {
+    "title": "Blog My-Monkey",
+    "description": "Carnet de bord...",
+    "category": "blog"
+  }
+}
+```
+
+C'est tout. ~10 lignes. Pour une app Node :
+
+```json
+{
+  "target": "manabo.my-monkey.fr",
+  "source": "./.next/standalone/",
+  "nodejs_app": "manabo-api",
+  "setup": {
+    "nodejs_version": "22.17.0",
+    "startup_file": "server.js"
+  },
+  "migrations": {
+    "type": "mysql",
+    "db": "coma7094_madb",
+    "dir": "./migrations",
+    "creds_env": "MADB"
+  },
+  "post_deploy": "touch tmp/restart.txt"
+}
+```
+
+Encore une fois — 15 lignes max. Tout ce qui est implicite (rsync exclude par défaut, tarball format, ordre des phases) est géré par le worker.
+
+## Le flow
+
+```
+1. git push → GitHub Action build → gh release create vX.Y.Z
+2. GitHub webhook org-level → https://git.my-monkey.fr/webhook
+3. Worker monkey (sur cookie-server):
+   - download tarball
+   - extract, read .monkey
+   - rsync source vers O2switch (SSH key auth)
+   - exécute migrations (si bloc migrations:)
+   - exécute post_deploy à distance
+4. Notif ntfy sur mon téléphone : ✅ ou ❌
+5. ~30-60s après le push, c'est live
+```
+
+L'idée clé : **le worker tourne sur mon serveur perso**, pas dans le cloud. Il a une SSH key vers O2switch, un token GitHub, et c'est tout. Pas de service externe entre le code et la prod.
+
+## Ce qui est sympa
+
+**Zéro vendor lock-in.** Si O2switch fait faillite demain, je change `target` partout (1 sed) et je redirige le rsync vers autre chose.
+
+**Auto-discovery.** Tous les `.monkey` qui ont un bloc `site:` sont listés sur `https://git.my-monkey.fr/api/sites`. Cette liste alimente automatiquement la grille de projets sur `my-monkey.fr` — quand j'ajoute un nouveau projet, je rajoute juste le bloc `site:` dans son `.monkey`, je release, et il apparaît sur la landing sans avoir à toucher au repo `landing-page`.
+
+**Migrations SQL gratuites.** Je mets `migrations:` dans le `.monkey`, j'ajoute des `001_init.sql`, `002_users.sql`... dans `migrations/`. Le worker applique uniquement ceux non encore exécutés (tracking via une table `_monkey_migrations`). Idempotent — un re-deploy n'applique rien si tout est à jour.
+
+**Préprod automatique.** Une release "prerelease" (`release.prerelease=true`) va sur `preprod.<target>` au lieu de `<target>`. Zéro config supplémentaire.
+
+## Ce qui est moche
+
+**C'est du custom.** Personne d'autre que moi n'a la doc en tête. Si je me fais renverser par un bus, le service est mort.
+
+**Le worker est un SPOF.** S'il tombe, plus de deploy. Mitigation : restart automatique via systemd, healthcheck sur l'Uptime Kuma.
+
+**Pas d'observabilité standard.** Pas de Datadog, pas de Sentry. J'ai un mini dashboard maison sur `http://monkey.cookie/` (Tailscale-only) qui liste les deploys récents avec leurs logs par phase. Suffisant pour mes besoins, pas pour une équipe.
+
+**Le bus factor.** Pas terrible pour un projet utilisé par d'autres. Pour des projets perso, c'est OK.
+
+## Quand ça vaut le coup d'écrire un truc comme ça
+
+| Tu as... | Recommandation |
+|---|---|
+| 1 à 5 projets perso | Vercel/Netlify gratuit, ne te complique pas la vie |
+| Une équipe et des SLA | Vercel/Netlify payant, ou ton cloud d'entreprise |
+| 20+ projets perso ET un serveur perso ET t'aimes bidouiller | Écris ton truc. C'est ~500 lignes de Node et tu sais tout ce qui s'y passe. |
+
+Pour moi, la troisième case. Aucune chance que je revienne à 25 dashboards Vercel.
+
+## Bonus : le `.monkey` parse
+
+Pour ceux qui veulent en piquer l'idée, voici les champs supportés actuellement :
+
+- `target` — le sous-domaine de destination
+- `source` — dossier à rsync (ex: `./dist/` pour du Vite/Astro, `./.next/standalone/` pour du Next.js)
+- `setup.nodejs_version` — résolu au plus proche installé côté O2switch
+- `setup.spa_routing` — pour SPA, ajoute le `.htaccess` qui catch-all vers `index.html`
+- `nodejs_app` — nom de l'app Node, présence active le restart
+- `migrations` — bloc opt-in MySQL/MariaDB
+- `post_deploy` — commande shell exécutée en SSH après le rsync
+- `site` — opt-in pour apparaître sur la landing publique
+- `preprod_target` + `preprod_setup` — déclenche pour les `release.prerelease=true`
+
+Le tout parsé en ~50 lignes de TypeScript. Le reste du worker (~450 lignes) c'est le pipeline d'exécution avec retries, logs structurés par phase, et notifications.
