@@ -43,7 +43,10 @@ function openImage(src: string, alt: string) {
   img.src = src;
   img.alt = alt;
   content.appendChild(img);
+  const scrollY = window.scrollY;
   dlg.showModal();
+  window.scrollTo(0, scrollY);
+  dlg.addEventListener('close', () => window.scrollTo(0, scrollY), { once: true });
 }
 
 function attach() {

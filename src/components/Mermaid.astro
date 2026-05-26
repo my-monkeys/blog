@@ -69,16 +69,16 @@ const trimmed = code.replace(/^\n+|\n+$/g, '');
     const content = dlg.querySelector<HTMLElement>('.mermaid-dialog-content');
     if (!content) return;
     content.innerHTML = svgHTML;
-    // Mermaid sets style="max-width: 100%" on its SVG which keeps it
-    // tiny. Strip it so the dialog can grow to its native size or fill
-    // the wider container.
     const svg = content.querySelector<SVGSVGElement>('svg');
     if (svg) {
       svg.style.maxWidth = 'none';
       svg.style.width = '100%';
       svg.style.height = 'auto';
     }
+    const scrollY = window.scrollY;
     dlg.showModal();
+    window.scrollTo(0, scrollY);
+    dlg.addEventListener('close', () => window.scrollTo(0, scrollY), { once: true });
   }
 
   async function renderAll() {
