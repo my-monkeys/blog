@@ -1,0 +1,180 @@
+---
+title: "50 serveurs MCP zombies qui crashaient mon Mac"
+date: 2026-05-26
+type: post-mortem
+excerpt: "Mon MacBook plantait en boucle. La cause : un plugin Claude Code qui spawnait des dizaines de processus orphelins à chaque session, saturant les 16 GB de RAM."
+tags: ["claude-code", "mcp", "debug", "macos"]
+draft: false
+---
+
+import Mortem from '@/components/Mortem.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+import Callout from '@/components/Callout.astro';
+
+<Mortem
+  symptom="MacBook Pro 16 GB crashe en boucle. macOS force-kill des apps au hasard, swap explose à 2 GB+, le système devient inutilisable en quelques minutes."
+  cause="Le plugin claude-brain-sync spawne un subagent `claude -p` (avec tous ses MCP servers) à chaque démarrage de session via un hook `evolve --auto`. Les processus ne meurent pas quand la session parente crash — ils s'accumulent. 4 sessions = 6 subagents × ~25 MCP servers chacun = 50+ processus zombie."
+  fix="Kill des processus orphelins (`kill` sur les PID brain-sync), désinstallation du plugin (`claude plugin remove claude-brain-sync`). RAM : 18.2 GB → 12.9 GB instantanément."
+/>
+
+## Le symptôme
+
+Mon Mac crash. Encore. Pour la troisième fois en une heure.
+
+Pas un kernel panic propre — le genre de crash mou où macOS commence par tuer Safari, puis le Finder, puis se fige complètement. Le ventilateur hurle. Force reboot, ça repart 10 minutes, ça recrashe.
+
+J'ouvre un terminal et je regarde les basics :
+
+```bash
+ps aux -m | awk 'NR>1 {sum+=$6} END {printf "RAM: %.1f GB\n", sum/1024/1024}'
+# RAM: 18.2 GB
+
+sysctl vm.swapusage
+# total = 3072.00M  used = 1868.44M  free = 1203.56M
+```
+
+18 GB de RSS sur une machine qui en a 16. Presque 2 GB de swap. macOS compresse en mémoire ce qu'il peut, mais il n'y a plus rien à compresser.
+
+## L'enquête
+
+Premier réflexe : qu'est-ce qui mange autant ?
+
+```bash
+ps aux | grep 'claude' | grep -v grep | wc -l
+# 10
+```
+
+10 processus Claude. J'en ai ouvert **un seul** terminal.
+
+```bash
+ps aux | grep -E 'npm exec|mcp' | grep -v grep | wc -l
+# 50
+```
+
+50 serveurs MCP. 50.
+
+## Le coupable
+
+En détaillant les processus Claude, le pattern saute aux yeux :
+
+```bash
+PID 2768   claude --dangerously-skip-permissions --resume   # ← ma session
+PID 6634   claude -p "You are analyzing a person's Claude Code brain..."
+PID 10440  claude -p "You are analyzing a person's Claude Code brain..."
+PID 17129  claude -p "You are analyzing a person's Claude Code brain..."
+PID 21303  claude -p "You are analyzing a person's Claude Code brain..."
+PID 25119  claude -p "You are analyzing a person's Claude Code brain..."
+PID 28953  claude -p "You are analyzing a person's Claude Code brain..."
+```
+
+6 instances `claude -p` identiques lancées par le plugin **claude-brain-sync**. Chacune est un subagent `evolve --auto` qui "analyse le cerveau pour promouvoir des patterns" — une sorte de maintenance automatique de la mémoire.
+
+En parallèle, des dizaines de scripts bash orphelins :
+
+```bash
+PID 10439  bash evolve.sh --auto
+PID 10428  bash evolve.sh --auto
+PID 6633   bash evolve.sh --auto
+PID 6622   bash evolve.sh --auto
+# ... 12 au total
+
+PID 6659   bash pull.sh --quiet
+PID 2957   bash pull.sh --quiet
+# ... 6 au total
+```
+
+Le merge-log confirme la frénésie — parfois 4 syncs en 40 secondes :
+
+```
+[2026-05-25T22:35:49Z] pull+merge: Merged 1 machine snapshots
+[2026-05-25T22:35:50Z] pull+merge: Merged 1 machine snapshots
+[2026-05-25T22:36:00Z] pull+merge: Merged 1 machine snapshots
+[2026-05-25T22:52:19Z] pull+merge: Merged 1 machine snapshots
+```
+
+## Le mécanisme de la bombe
+
+<Mermaid
+  caption="Comment 1 session Claude Code devient 50+ processus"
+  code={`
+flowchart TD
+  Session["Session Claude Code<br/>1 processus"] -->|hook session_start| Evolve["evolve.sh --auto<br/>2 scripts bash"]
+  Evolve -->|spawn| SubAgent["claude -p 'analyze brain...'<br/>1 processus Node"]
+  SubAgent -->|charge tous les MCP| MCP1["firebase-tools<br/>~300 MB"]
+  SubAgent --> MCP2["playwright<br/>~90 MB"]
+  SubAgent --> MCP3["dart LSP<br/>~300 MB"]
+  SubAgent --> MCP4["clockify<br/>~90 MB"]
+  SubAgent --> MCP5["ios-simulator<br/>~90 MB"]
+  SubAgent --> MCP6["+ 8 autres..."]
+  Evolve -->|spawn| Pull["pull.sh --quiet"]
+
+  Session -.->|"crash → reboot<br/>processus orphelins<br/>restent vivants"| Evolve
+
+  style Session fill:#2ECC71,color:#0E0E10
+  style SubAgent fill:#FF5E78,color:#0E0E10
+  style MCP1 fill:#FF5E78,color:#0E0E10
+  style MCP2 fill:#FF5E78,color:#0E0E10
+  style MCP3 fill:#FF5E78,color:#0E0E10
+  style MCP4 fill:#FF5E78,color:#0E0E10
+  style MCP5 fill:#FF5E78,color:#0E0E10
+  style MCP6 fill:#FF5E78,color:#0E0E10
+`}
+/>
+
+Le problème est double :
+
+1. **Chaque subagent `claude -p` charge tous les MCP servers configurés globalement** — y compris ceux dont il n'a absolument pas besoin (Dart LSP, iOS Simulator, Minecraft schematic builder... pour "analyser un brain"). Sur ma config, ça fait ~25 MCP servers, soit **~2 GB par subagent**.
+
+2. **Les processus survivent au crash de la session parente.** Quand macOS force-kill ma session Claude sous pression mémoire, les subagents et leurs MCP restent orphelins. Au reboot de la session, le hook relance un nouveau batch. Les anciens sont toujours là. En 3-4 crashs, on arrive à 50+ processus.
+
+## Le fix
+
+Étape 1 — kill immédiat :
+
+```bash
+ps aux | grep 'claude-brain-sync\|claude -p You' | grep -v grep \
+  | awk '{print $2}' | xargs kill
+```
+
+Résultat instantané :
+
+<CodeDiff
+  lang="bash"
+  beforeLabel="Avant : 50+ processus, 18.2 GB"
+  afterLabel="Après : 1 session, 12.9 GB"
+  caption="Impact du nettoyage"
+  before={`Claude instances:  10
+MCP servers:      50+
+RAM used:         18.2 GB
+Swap used:        1868 MB`}
+  after={`Claude instances:  1
+MCP servers:      10
+RAM used:         12.9 GB
+Swap used:        0 MB`}
+/>
+
+Étape 2 — désinstaller le plugin :
+
+```bash
+claude plugin remove claude-brain-sync@claude-brain-sync
+# ✔ Successfully uninstalled plugin: claude-brain-sync (scope: user)
+```
+
+## La leçon
+
+<Callout type="warn">
+Les plugins Claude Code qui utilisent des hooks `session_start` pour spawner des subagents (`claude -p`) sont une bombe à retardement sur les machines avec beaucoup de MCP servers configurés globalement. Chaque subagent hérite de **tous** les MCP servers, même s'il n'en utilise aucun.
+</Callout>
+
+Trois choses à retenir :
+
+**1. Surveille le nombre de processus Claude.** Si `ps aux | grep claude | wc -l` retourne plus que le nombre de terminaux ouverts, il y a un problème.
+
+**2. Déplace les MCP spécialisés du global vers le projet.** Dart LSP n'a rien à faire dans un projet Next.js. Firebase n'a rien à faire dans un projet Flutter. Moins de MCP globaux = moins de RAM par session = moins de dégâts en cas de fuite.
+
+**3. Méfie-toi des hooks auto.** Un hook `session_start` qui spawn un processus lourd doit impérativement nettoyer les instances précédentes avant d'en créer de nouvelles. Sinon, le premier crash déclenche une cascade.
+
+<Callout type="info" label="TL;DR">
+Si ton Mac crash en boucle avec Claude Code ouvert → `ps aux | grep claude | wc -l`. Si le nombre est anormal, cherche quel plugin spawne des subagents orphelins, kill-les, et désinstalle le coupable.
+</Callout>
