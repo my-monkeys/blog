@@ -24,27 +24,30 @@ const { symptom, cause, fix } = Astro.props;
 
 <style>
   .mortem {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    display: flex;
+    flex-direction: column;
     gap: 0;
     border: 2px solid var(--ink);
     margin: 2em 0;
   }
-  .mortem-cell { padding: 1.25rem; border-right: 2px solid var(--ink); background: var(--bg-elev); }
-  .mortem-cell:last-child { border-right: 0; }
-  .mortem-cell p { font-family: var(--font-body); font-size: 1rem; }
+  .mortem-cell {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 20%, transparent);
+    background: var(--bg-elev);
+    align-items: baseline;
+  }
+  .mortem-cell:last-child { border-bottom: 0; }
+  .mortem-cell p { font-family: var(--font-body); font-size: 0.95rem; line-height: 1.5; }
   .mortem-label {
     font-family: var(--font-ui);
     font-weight: 700;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    margin-bottom: 0.5rem;
     color: var(--ink-soft);
-  }
-  @media (max-width: 720px) {
-    .mortem { grid-template-columns: 1fr; }
-    .mortem-cell { border-right: 0; border-bottom: 2px solid var(--ink); }
-    .mortem-cell:last-child { border-bottom: 0; }
+    flex-shrink: 0;
+    min-width: 5.5rem;
   }
 </style>

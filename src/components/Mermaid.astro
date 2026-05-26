@@ -75,10 +75,9 @@ const trimmed = code.replace(/^\n+|\n+$/g, '');
       svg.style.width = '100%';
       svg.style.height = 'auto';
     }
-    const scrollY = window.scrollY;
+    document.body.style.overflow = 'hidden';
     dlg.showModal();
-    window.scrollTo(0, scrollY);
-    dlg.addEventListener('close', () => window.scrollTo(0, scrollY), { once: true });
+    dlg.addEventListener('close', () => { document.body.style.overflow = ''; }, { once: true });
   }
 
   async function renderAll() {
@@ -210,6 +209,9 @@ const trimmed = code.replace(/^\n+|\n+$/g, '');
 
   /* Lightbox dialog */
   .mermaid-dialog {
+    position: fixed;
+    inset: 0;
+    margin: auto;
     width: min(96vw, 1400px);
     max-width: 96vw;
     height: 92vh;
@@ -219,7 +221,6 @@ const trimmed = code.replace(/^\n+|\n+$/g, '');
     background: var(--bg);
     color: var(--ink);
     box-shadow: var(--shadow-hard);
-    position: relative;
   }
   .mermaid-dialog::backdrop {
     background: rgba(0, 0, 0, 0.75);

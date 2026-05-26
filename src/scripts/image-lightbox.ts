@@ -43,10 +43,9 @@ function openImage(src: string, alt: string) {
   img.src = src;
   img.alt = alt;
   content.appendChild(img);
-  const scrollY = window.scrollY;
+  document.body.style.overflow = 'hidden';
   dlg.showModal();
-  window.scrollTo(0, scrollY);
-  dlg.addEventListener('close', () => window.scrollTo(0, scrollY), { once: true });
+  dlg.addEventListener('close', () => { document.body.style.overflow = ''; }, { once: true });
 }
 
 function attach() {
