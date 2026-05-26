@@ -336,6 +336,22 @@ Si tu utilises `@tailwindcss/postcss` avec Next.js 16 : **désinstalle-le**. Rem
 C'est un [bug connu](https://github.com/vercel/next.js/discussions/77102) — Turbopack + PostCSS workers = cascade exponentielle.
 </Callout>
 
+## Bonus : une app menu bar pour ne plus jamais se faire avoir
+
+Le watchdog bash fait le job mais il faut un terminal dédié. J'ai fini par écrire une app macOS native — **Claude Monitor** — qui vit dans la menu bar et surveille en permanence.
+
+C'est une app SwiftUI de ~300 lignes, compilée avec Swift Package Manager, zéro dépendance. Le singe 🐵 dans la menu bar affiche en temps réel le nombre de Claude et MCP servers. Un clic ouvre le dashboard :
+
+- **RAM** en gros avec barre de progression colorée (vert/orange/rouge)
+- **Compteurs** : Claude instances, MCP servers, PostCSS workers avec la RAM de chaque catégorie
+- **Top apps** par consommation mémoire avec mini barres visuelles
+- **Boutons kill** : un clic pour tuer tous les PostCSS workers ou tous les MCP servers
+- **Auto-kill configurable** : sliders pour ajuster le seuil (nombre de workers et GB de RAM)
+
+L'auto-kill vérifie toutes les 5 secondes. Si les PostCSS dépassent le seuil ou que la RAM explose, il les tue avant que le Mac ne crash. C'est le watchdog bash, mais en app native, toujours visible, toujours actif.
+
+Le code est dans [`my-monkeys/claude-monitor`](https://github.com/my-monkeys/claude-monitor) — un `swift build -c release` et c'est installé.
+
 ## Ce que j'ai appris
 
 **1. Le premier suspect est rarement le bon.** J'ai accusé les MCP servers, un plugin Claude Code, les login items, et un navigateur avant de trouver le vrai coupable. Chacun avait l'air coupable sur le moment.
