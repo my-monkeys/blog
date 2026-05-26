@@ -72,6 +72,19 @@ De 13.6 à 72 GB en moins d'une minute. Le snapshot montre ~25 processus Dia (na
 
 Mais quelque chose cloche : le snapshot ne montre que ~1.5 GB de processus identifiés pour 72 GB reportés. Et Dia tourne sans problème le reste du temps.
 
+## Le signal qui a tout changé
+
+À ce stade, j'ai un watchdog qui log toutes les 5 secondes mais qui ne peut pas empêcher le crash. Au spike suivant, macOS s'effondre tellement vite que plus aucun terminal ne s'ouvre :
+
+```
+[forkpty: Resource temporarily unavailable]
+[Could not create a new process and open a pseudo-tty.]
+```
+
+Plus de PTY disponibles. Le système a épuisé ses pseudo-terminaux — soit parce qu'il n'a plus de mémoire pour en allouer, soit parce que des centaines de processus les ont tous réservés. Je ne peux plus rien inspecter, plus rien kill. Force reboot.
+
+C'est ce message qui m'a poussé à chercher plus loin. Le problème n'est pas une app qui consomme trop de RAM — c'est quelque chose qui **spawne des centaines de processus**. Assez pour épuiser les PTY du système en quelques secondes. J'améliore le watchdog pour compter et nommer les processus par application, et j'ajoute un **auto-kill** au-delà de 20 GB.
+
 ## Le watchdog v2 : les noms de processus
 
 J'améliore le watchdog pour agréger la RAM par application. Au prochain spike, les logs montrent la vérité :
