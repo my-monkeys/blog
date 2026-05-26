@@ -1,10 +1,19 @@
 ---
-// Comments — custom Supabase-backed system, no login required.
-// Table: blog_comments (project MyMonkey / klliwmgdyuatstjvzzbb)
+// Comments — Supabase-backed, two auth modes:
+// 1. Anonymous: session_token (uuid) stored in localStorage → edit/delete own comments
+// 2. OAuth My-Monkey: Supabase Auth cookie on .my-monkey.fr → edit/delete via user_id
 ---
 
 <section class="comments" aria-label="Commentaires">
   <h2 class="section-heading">Commentaires</h2>
+
+  <div class="comment-auth" data-comment-auth>
+    <button type="button" class="comment-login-btn" data-login-btn>Se connecter avec My-Monkey</button>
+    <div class="comment-user" data-comment-user hidden>
+      <span data-user-name></span>
+      <button type="button" class="comment-logout-btn" data-logout-btn>Déconnexion</button>
+    </div>
+  </div>
 
   <form class="comment-form" data-comment-form>
     <div class="comment-form-row">
@@ -37,121 +46,243 @@
   </div>
 </section>
 
-<script is:inline>
-  (function () {
-    var SUPABASE_URL = 'https://klliwmgdyuatstjvzzbb.supabase.co';
-    var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsbGl3bWdkeXVhdHN0anZ6emJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4MDI4MTAsImV4cCI6MjA4ODM3ODgxMH0.6qmXdDdToqZvqvaOXm8d-0r5rK6a-QCad2o1IRZe0KM';
-    var TABLE = 'blog_comments';
+<script>
+  import { createClient } from '@supabase/supabase-js';
 
-    function getSlug() {
-      return window.location.pathname.replace(/\/+$/, '').split('/').pop() || '';
+  const SUPABASE_URL = 'https://klliwmgdyuatstjvzzbb.supabase.co';
+  const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsbGl3bWdkeXVhdHN0anZ6emJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4MDI4MTAsImV4cCI6MjA4ODM3ODgxMH0.6qmXdDdToqZvqvaOXm8d-0r5rK6a-QCad2o1IRZe0KM';
+  const TABLE = 'blog_comments';
+  const TOKEN_KEY = 'blog_comment_token';
+  const NAME_KEY = 'blog_comment_name';
+
+  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+    auth: { persistSession: true, storageKey: 'sb-klliwmgdyuatstjvzzbb-auth-token' },
+  });
+
+  function getSlug() {
+    return window.location.pathname.replace(/\/+$/, '').split('/').pop() || '';
+  }
+
+  function getSessionToken(): string {
+    let token = localStorage.getItem(TOKEN_KEY);
+    if (!token) {
+      token = crypto.randomUUID();
+      localStorage.setItem(TOKEN_KEY, token);
     }
+    return token;
+  }
 
-    function escapeHTML(s) {
-      var d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
+  function escapeHTML(s: string) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function timeAgo(dateStr: string) {
+    const diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
+    if (diff < 60) return "à l'instant";
+    if (diff < 3600) return Math.floor(diff / 60) + ' min';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' h';
+    if (diff < 2592000) return Math.floor(diff / 86400) + ' j';
+    return new Date(dateStr).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+  }
+
+  interface Comment {
+    id: string;
+    post_slug: string;
+    author_name: string;
+    message: string;
+    session_token: string;
+    user_id: string | null;
+    created_at: string;
+  }
+
+  let currentUser: { id: string; name: string } | null = null;
+
+  function canEdit(c: Comment): boolean {
+    if (currentUser && c.user_id === currentUser.id) return true;
+    if (c.session_token === getSessionToken()) return true;
+    return false;
+  }
+
+  function renderComments(comments: Comment[], listEl: HTMLElement) {
+    if (!comments.length) {
+      listEl.innerHTML = '<p class="comment-empty">Aucun commentaire. Sois le premier.</p>';
+      return;
     }
+    listEl.innerHTML = comments.map((c) =>
+      `<div class="comment" data-id="${c.id}">
+        <div class="comment-header">
+          <span class="comment-author">${escapeHTML(c.author_name)}${c.user_id ? ' <span class="comment-verified" title="Compte My-Monkey">✓</span>' : ''}</span>
+          <span class="comment-date">${timeAgo(c.created_at)}</span>
+          ${canEdit(c) ? `<div class="comment-actions">
+            <button type="button" class="comment-action-btn" data-edit="${c.id}" title="Modifier">✎</button>
+            <button type="button" class="comment-action-btn comment-action-delete" data-delete="${c.id}" title="Supprimer">✕</button>
+          </div>` : ''}
+        </div>
+        <p class="comment-body">${escapeHTML(c.message)}</p>
+      </div>`
+    ).join('');
 
-    function timeAgo(dateStr) {
-      var diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
-      if (diff < 60) return "à l'instant";
-      if (diff < 3600) return Math.floor(diff / 60) + ' min';
-      if (diff < 86400) return Math.floor(diff / 3600) + ' h';
-      if (diff < 2592000) return Math.floor(diff / 86400) + ' j';
-      return new Date(dateStr).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+    for (const btn of listEl.querySelectorAll<HTMLButtonElement>('[data-edit]')) {
+      btn.addEventListener('click', () => startEdit(btn.dataset.edit!, comments));
     }
+    for (const btn of listEl.querySelectorAll<HTMLButtonElement>('[data-delete]')) {
+      btn.addEventListener('click', () => deleteComment(btn.dataset.delete!));
+    }
+  }
 
-    function renderComments(comments, listEl) {
-      if (!comments.length) {
-        listEl.innerHTML = '<p class="comment-empty">Aucun commentaire. Sois le premier.</p>';
-        return;
+  function startEdit(id: string, comments: Comment[]) {
+    const c = comments.find((x) => x.id === id);
+    if (!c) return;
+    const el = document.querySelector<HTMLElement>(`.comment[data-id="${id}"]`);
+    if (!el) return;
+    const body = el.querySelector('.comment-body')!;
+    body.innerHTML = `
+      <textarea class="comment-edit-textarea" maxlength="2000">${escapeHTML(c.message)}</textarea>
+      <div class="comment-edit-actions">
+        <button type="button" class="comment-submit comment-save-btn" data-save="${id}">Sauver</button>
+        <button type="button" class="comment-cancel-btn" data-cancel="${id}">Annuler</button>
+      </div>
+    `;
+    const textarea = body.querySelector('textarea')!;
+    textarea.value = c.message;
+    textarea.focus();
+    body.querySelector<HTMLButtonElement>('[data-save]')!.addEventListener('click', () => saveEdit(id, textarea.value));
+    body.querySelector<HTMLButtonElement>('[data-cancel]')!.addEventListener('click', () => loadComments());
+  }
+
+  async function saveEdit(id: string, message: string) {
+    const trimmed = message.trim();
+    if (!trimmed) return;
+    const headers: Record<string, string> = { 'x-session-token': getSessionToken() };
+    const { error } = await supabase
+      .from(TABLE)
+      .update({ message: trimmed })
+      .eq('id', id)
+      .headers(headers);
+    if (error) console.error('update failed:', error);
+    loadComments();
+  }
+
+  async function deleteComment(id: string) {
+    if (!confirm('Supprimer ce commentaire ?')) return;
+    const headers: Record<string, string> = { 'x-session-token': getSessionToken() };
+    const { error } = await supabase
+      .from(TABLE)
+      .delete()
+      .eq('id', id)
+      .headers(headers);
+    if (error) console.error('delete failed:', error);
+    loadComments();
+  }
+
+  async function loadComments() {
+    const listEl = document.querySelector<HTMLElement>('[data-comment-list]');
+    if (!listEl) return;
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select('*')
+      .eq('post_slug', getSlug())
+      .order('created_at', { ascending: true });
+    if (error) {
+      listEl.innerHTML = '<p class="comment-empty">Impossible de charger les commentaires.</p>';
+      return;
+    }
+    renderComments(data as Comment[], listEl);
+  }
+
+  async function updateAuthUI() {
+    const { data: { user } } = await supabase.auth.getUser();
+    const loginBtn = document.querySelector<HTMLElement>('[data-login-btn]');
+    const userEl = document.querySelector<HTMLElement>('[data-comment-user]');
+    const nameInput = document.querySelector<HTMLInputElement>('[name="author_name"]');
+    const nameEl = document.querySelector<HTMLElement>('[data-user-name]');
+
+    if (user) {
+      const name = user.user_metadata?.full_name || user.user_metadata?.name || user.email || 'Utilisateur';
+      currentUser = { id: user.id, name };
+      if (loginBtn) loginBtn.hidden = true;
+      if (userEl) { userEl.hidden = false; }
+      if (nameEl) nameEl.textContent = name;
+      if (nameInput) { nameInput.value = name; nameInput.readOnly = true; }
+    } else {
+      currentUser = null;
+      if (loginBtn) loginBtn.hidden = false;
+      if (userEl) userEl.hidden = true;
+      if (nameInput) {
+        nameInput.readOnly = false;
+        const saved = localStorage.getItem(NAME_KEY);
+        if (saved) nameInput.value = saved;
       }
-      listEl.innerHTML = comments.map(function (c) {
-        return '<div class="comment">' +
-          '<div class="comment-header">' +
-            '<span class="comment-author">' + escapeHTML(c.author_name) + '</span>' +
-            '<span class="comment-date">' + timeAgo(c.created_at) + '</span>' +
-          '</div>' +
-          '<p class="comment-body">' + escapeHTML(c.message) + '</p>' +
-        '</div>';
-      }).join('');
     }
+  }
 
-    function supaFetch(method, params) {
-      var url = SUPABASE_URL + '/rest/v1/' + TABLE;
-      var opts = {
-        method: method,
-        headers: {
-          'apikey': SUPABASE_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_KEY,
-          'Content-Type': 'application/json',
-          'Prefer': method === 'POST' ? 'return=representation' : undefined
-        }
+  function attachForm() {
+    const form = document.querySelector<HTMLFormElement>('[data-comment-form]');
+    if (!form || form.dataset.attached === '1') return;
+    form.dataset.attached = '1';
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errorEl = form.querySelector<HTMLElement>('[data-comment-error]')!;
+      const btn = form.querySelector<HTMLButtonElement>('.comment-submit')!;
+      const nameInput = form.querySelector<HTMLInputElement>('[name="author_name"]')!;
+      const msgInput = form.querySelector<HTMLTextAreaElement>('[name="message"]')!;
+      const name = nameInput.value.trim();
+      const msg = msgInput.value.trim();
+      if (!name || !msg) return;
+
+      btn.disabled = true;
+      btn.textContent = '…';
+      errorEl.textContent = '';
+
+      if (!currentUser) localStorage.setItem(NAME_KEY, name);
+
+      const row: Record<string, unknown> = {
+        post_slug: getSlug(),
+        author_name: name,
+        message: msg,
+        session_token: getSessionToken(),
       };
-      if (method === 'GET') {
-        url += '?post_slug=eq.' + encodeURIComponent(params.slug) + '&order=created_at.asc';
+      if (currentUser) row.user_id = currentUser.id;
+
+      const { error } = await supabase.from(TABLE).insert(row);
+      if (error) {
+        errorEl.textContent = 'Erreur : ' + (error.message || 'réessaie.');
       } else {
-        opts.body = JSON.stringify(params);
+        msgInput.value = '';
+        loadComments();
       }
-      return fetch(url, opts).then(function (r) {
-        if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
-        return r.json();
-      });
-    }
+      btn.disabled = false;
+      btn.textContent = 'Envoyer';
+    });
+  }
 
-    function loadComments() {
-      var listEl = document.querySelector('[data-comment-list]');
-      if (!listEl) return;
-      supaFetch('GET', { slug: getSlug() })
-        .then(function (data) { renderComments(data, listEl); })
-        .catch(function () { listEl.innerHTML = '<p class="comment-empty">Impossible de charger les commentaires.</p>'; });
-    }
+  function attachAuth() {
+    const loginBtn = document.querySelector<HTMLButtonElement>('[data-login-btn]');
+    const logoutBtn = document.querySelector<HTMLButtonElement>('[data-logout-btn]');
 
-    function attachForm() {
-      var form = document.querySelector('[data-comment-form]');
-      if (!form || form.dataset.attached === '1') return;
-      form.dataset.attached = '1';
+    loginBtn?.addEventListener('click', () => {
+      const redirectTo = window.location.href;
+      window.location.href = `https://auth.my-monkey.fr/login?redirect=${encodeURIComponent(redirectTo)}`;
+    });
 
-      var saved = localStorage.getItem('blog_comment_name');
-      if (saved) form.querySelector('[name="author_name"]').value = saved;
-
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var errorEl = form.querySelector('[data-comment-error]');
-        var btn = form.querySelector('.comment-submit');
-        var name = form.querySelector('[name="author_name"]').value.trim();
-        var msg = form.querySelector('[name="message"]').value.trim();
-        if (!name || !msg) return;
-
-        btn.disabled = true;
-        btn.textContent = '…';
-        errorEl.textContent = '';
-
-        localStorage.setItem('blog_comment_name', name);
-
-        supaFetch('POST', { post_slug: getSlug(), author_name: name, message: msg })
-          .then(function () {
-            form.querySelector('[name="message"]').value = '';
-            loadComments();
-          })
-          .catch(function (err) {
-            errorEl.textContent = 'Erreur : ' + (err.message || 'réessaie.');
-          })
-          .finally(function () {
-            btn.disabled = false;
-            btn.textContent = 'Envoyer';
-          });
-      });
-    }
-
-    function init() {
+    logoutBtn?.addEventListener('click', async () => {
+      await supabase.auth.signOut();
+      updateAuthUI();
       loadComments();
-      attachForm();
-    }
+    });
+  }
 
-    document.addEventListener('astro:page-load', init);
-  })();
+  async function init() {
+    await updateAuthUI();
+    loadComments();
+    attachForm();
+    attachAuth();
+  }
+
+  document.addEventListener('astro:page-load', init);
 </script>
 
 <style>
@@ -170,6 +301,47 @@
     margin-bottom: 1.25rem;
   }
 
+  .comment-auth {
+    margin-bottom: 1.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .comment-login-btn {
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 0.8125rem;
+    letter-spacing: 0.04em;
+    padding: 0.4rem 1rem;
+    border: 2px solid var(--ink);
+    background: var(--bg);
+    color: var(--ink);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .comment-login-btn:hover {
+    background: var(--ink);
+    color: var(--bg);
+  }
+  .comment-user {
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .comment-user [data-user-name] { font-weight: 600; }
+  .comment-logout-btn {
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    text-decoration: underline;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+  }
+
   .comment-form {
     display: flex;
     flex-direction: column;
@@ -177,7 +349,8 @@
     margin-bottom: 2rem;
   }
   .comment-input,
-  .comment-textarea {
+  .comment-textarea,
+  .comment-edit-textarea {
     font-family: var(--font-ui);
     font-size: 0.9375rem;
     padding: 0.6rem 0.75rem;
@@ -187,15 +360,25 @@
     width: 100%;
     resize: vertical;
   }
+  .comment-input[readonly] {
+    background: var(--bg-elev);
+    color: var(--ink-soft);
+    cursor: not-allowed;
+  }
   .comment-input::placeholder,
   .comment-textarea::placeholder {
     color: var(--ink-soft);
     opacity: 0.6;
   }
   .comment-input:focus,
-  .comment-textarea:focus {
+  .comment-textarea:focus,
+  .comment-edit-textarea:focus {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
+  }
+  .comment-edit-textarea {
+    margin-bottom: 0.5rem;
+    min-height: 4rem;
   }
   .comment-form-footer {
     display: flex;
@@ -231,10 +414,23 @@
     cursor: not-allowed;
   }
 
+  .comment-edit-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+  .comment-cancel-btn {
+    font-family: var(--font-ui);
+    font-size: 0.8125rem;
+    padding: 0.4rem 0.75rem;
+    border: 2px solid var(--ink);
+    background: var(--bg);
+    color: var(--ink);
+    cursor: pointer;
+  }
+
   .comment-list {
     display: flex;
     flex-direction: column;
-    gap: 0;
   }
   .comment-loading,
   .comment-empty {
@@ -259,10 +455,38 @@
     font-weight: 600;
     font-size: 0.875rem;
   }
+  .comment-verified {
+    color: var(--accent);
+    font-size: 0.75rem;
+  }
   .comment-date {
     font-family: var(--font-ui);
     font-size: 0.75rem;
     color: var(--ink-soft);
+  }
+  .comment-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 0.25rem;
+  }
+  .comment-action-btn {
+    font-family: var(--font-ui);
+    font-size: 0.8125rem;
+    padding: 0.15rem 0.4rem;
+    border: 1px solid color-mix(in srgb, var(--ink) 25%, transparent);
+    background: var(--bg);
+    color: var(--ink-soft);
+    cursor: pointer;
+    line-height: 1;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .comment-action-btn:hover {
+    color: var(--ink);
+    border-color: var(--ink);
+  }
+  .comment-action-delete:hover {
+    color: var(--alert);
+    border-color: var(--alert);
   }
   .comment-body {
     font-family: var(--font-body);
