@@ -1,14 +1,14 @@
 ---
 // Comments — Supabase-backed, two auth modes:
 // 1. Anonymous: session_token (uuid) stored in localStorage → edit/delete own comments
-// 2. OAuth My-Monkey: Supabase Auth cookie on .my-monkey.fr → edit/delete via user_id
+// 2. SSO My-Monkey: shared Supabase cookie on .my-monkey.fr → edit/delete via user_id
 ---
 
 <section class="comments" aria-label="Commentaires">
   <h2 class="section-heading">Commentaires</h2>
 
-  <div class="comment-auth" data-comment-auth>
-    <button type="button" class="comment-login-btn" data-login-btn>Se connecter avec My-Monkey</button>
+  <div class="comment-auth" data-comment-auth hidden>
+    <button type="button" class="comment-login-btn" data-login-btn hidden>Se connecter avec My-Monkey</button>
     <div class="comment-user" data-comment-user hidden>
       <span data-user-name></span>
       <button type="button" class="comment-logout-btn" data-logout-btn>Déconnexion</button>
@@ -47,7 +47,7 @@
 </section>
 
 <script>
-  import { createClient } from '@supabase/supabase-js';
+  import { createBrowserClient } from '@supabase/ssr';
 
   const SUPABASE_URL = 'https://klliwmgdyuatstjvzzbb.supabase.co';
   const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsbGl3bWdkeXVhdHN0anZ6emJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4MDI4MTAsImV4cCI6MjA4ODM3ODgxMH0.6qmXdDdToqZvqvaOXm8d-0r5rK6a-QCad2o1IRZe0KM';
@@ -55,8 +55,13 @@
   const TOKEN_KEY = 'blog_comment_token';
   const NAME_KEY = 'blog_comment_name';
 
-  const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
-    auth: { persistSession: true, storageKey: 'sb-klliwmgdyuatstjvzzbb-auth-token' },
+  const supabase = createBrowserClient(SUPABASE_URL, SUPABASE_KEY, {
+    cookieOptions: {
+      domain: '.my-monkey.fr',
+      path: '/',
+      sameSite: 'lax' as const,
+      secure: location.protocol === 'https:',
+    },
   });
 
   function getSlug() {
@@ -139,7 +144,7 @@
     if (!el) return;
     const body = el.querySelector('.comment-body')!;
     body.innerHTML = `
-      <textarea class="comment-edit-textarea" maxlength="2000">${escapeHTML(c.message)}</textarea>
+      <textarea class="comment-edit-textarea" maxlength="2000"></textarea>
       <div class="comment-edit-actions">
         <button type="button" class="comment-submit comment-save-btn" data-save="${id}">Sauver</button>
         <button type="button" class="comment-cancel-btn" data-cancel="${id}">Annuler</button>
@@ -155,24 +160,22 @@
   async function saveEdit(id: string, message: string) {
     const trimmed = message.trim();
     if (!trimmed) return;
-    const headers: Record<string, string> = { 'x-session-token': getSessionToken() };
     const { error } = await supabase
       .from(TABLE)
       .update({ message: trimmed })
       .eq('id', id)
-      .headers(headers);
+      .headers({ 'x-session-token': getSessionToken() });
     if (error) console.error('update failed:', error);
     loadComments();
   }
 
   async function deleteComment(id: string) {
     if (!confirm('Supprimer ce commentaire ?')) return;
-    const headers: Record<string, string> = { 'x-session-token': getSessionToken() };
     const { error } = await supabase
       .from(TABLE)
       .delete()
       .eq('id', id)
-      .headers(headers);
+      .headers({ 'x-session-token': getSessionToken() });
     if (error) console.error('delete failed:', error);
     loadComments();
   }
@@ -193,19 +196,21 @@
   }
 
   async function updateAuthUI() {
-    const { data: { user } } = await supabase.auth.getUser();
+    const authContainer = document.querySelector<HTMLElement>('[data-comment-auth]');
     const loginBtn = document.querySelector<HTMLElement>('[data-login-btn]');
     const userEl = document.querySelector<HTMLElement>('[data-comment-user]');
     const nameInput = document.querySelector<HTMLInputElement>('[name="author_name"]');
     const nameEl = document.querySelector<HTMLElement>('[data-user-name]');
 
+    const { data: { user } } = await supabase.auth.getUser();
+
     if (user) {
       const name = user.user_metadata?.full_name || user.user_metadata?.name || user.email || 'Utilisateur';
       currentUser = { id: user.id, name };
       if (loginBtn) loginBtn.hidden = true;
-      if (userEl) { userEl.hidden = false; }
-      if (nameEl) nameEl.textContent = name;
+      if (userEl) userEl.hidden = false;
       if (nameInput) { nameInput.value = name; nameInput.readOnly = true; }
+      if (nameEl) nameEl.textContent = name;
     } else {
       currentUser = null;
       if (loginBtn) loginBtn.hidden = false;
@@ -216,6 +221,8 @@
         if (saved) nameInput.value = saved;
       }
     }
+
+    if (authContainer) authContainer.hidden = false;
   }
 
   function attachForm() {
