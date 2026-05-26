@@ -1,0 +1,245 @@
+---
+title: "SSO maison avec Supabase OAuth Server"
+date: 2026-05-26
+type: article
+excerpt: "Comment j'ai monté un SSO cross-domaines pour 25 sous-sites avec ~150 lignes de code, en utilisant une feature Supabase que peu de gens connaissent."
+tags: ["auth", "supabase", "oauth", "next-auth", "architecture"]
+project: "auth-mymonkey"
+draft: false
+---
+
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+import Callout from '@/components/Callout.astro';
+
+J'ai 25+ sous-sites sur `*.my-monkey.fr`. Chacun avec sa propre app Next.js, ses propres données, son propre Supabase. Et pendant longtemps, chaque app avait sa propre page de login, son propre formulaire d'inscription, sa propre gestion de session.
+
+Le résultat : 25 comptes séparés pour le même utilisateur. Se connecter à `fapmap.my-monkey.fr` ne te connecte pas à `kebab.my-monkey.fr`. Les gens créent un compte, l'oublient, en recréent un. Personne ne sait combien de fois il s'est inscrit.
+
+Je voulais un **SSO** : un seul login sur `auth.my-monkey.fr`, et tous les sous-sites te reconnaissent.
+
+## L'option évidente (et pourquoi je ne l'ai pas prise)
+
+Premier réflexe : `node-oidc-provider`. C'est la lib de référence pour monter un serveur OIDC en Node.js. Tu définis tes clients, tes scopes, tu gères les tokens, les JWKS, le consentement. Propre.
+
+Problème : mon hébergement prod c'est **O2switch** (mutualisé, CloudLinux, Passenger). Pas de Docker, pas de processus long-running garanti, pas de Redis pour les sessions. Héberger un IdP qui doit être disponible 100% du temps sur un mutu, c'est chercher les emmerdes.
+
+J'allais prendre cette route quand j'ai découvert que **Supabase Auth expose nativement un serveur OAuth 2.1** depuis décembre 2025.
+
+## Supabase est le serveur
+
+La feature s'appelle "OAuth 2.1 Server" dans la doc Supabase. En gros : ton projet Supabase **est** un IdP. Il expose `/.well-known/openid-configuration`, signe des JWT, gère les refresh tokens, fait du PKCE. Tout ce que `node-oidc-provider` fait, mais sans rien à héberger.
+
+Ce que j'ai à écrire, moi : **une page de consentement**. Quand un utilisateur arrive sur `fapmap.my-monkey.fr` et clique "Connexion", il est redirigé vers `auth.my-monkey.fr/oauth/consent` où il voit "Fapmap veut accéder à votre compte". Il clique Autoriser, Supabase émet les tokens, et il est renvoyé sur Fapmap connecté.
+
+<Mermaid
+  caption="Flow OAuth simplifié — Supabase fait tout le protocole"
+  code={`
+sequenceDiagram
+  participant U as Utilisateur
+  participant App as fapmap.my-monkey.fr
+  participant Auth as auth.my-monkey.fr
+  participant SB as Supabase Auth
+
+  U->>App: Clic "Connexion"
+  App->>SB: /authorize (client_id, redirect_uri, PKCE)
+  SB-->>Auth: Redirect → /oauth/consent
+  Auth->>U: "Fapmap veut accéder à votre compte"
+  U->>Auth: Clic "Autoriser"
+  Auth->>SB: approveAuthorization(id)
+  SB-->>App: Redirect → callback (code)
+  App->>SB: /token (code → access_token + id_token)
+  App-->>U: Connecté ✓
+`}
+/>
+
+## Le code côté IdP : ~150 lignes
+
+Le projet `auth-mymonkey` est une app Next.js 15 minimaliste. La page critique c'est `/oauth/consent` :
+
+```typescript
+// app/oauth/consent/page.tsx (simplifié)
+import { createClient } from '@/lib/supabase/server';
+
+export default async function ConsentPage({ searchParams }) {
+  const supabase = await createClient();
+  const { data: auth } = await supabase.auth.oauth
+    .getAuthorizationDetails(searchParams.id);
+
+  if (!auth) redirect('/login');
+
+  return (
+    <div>
+      <h1>{auth.client.name} veut accéder à votre compte</h1>
+      <p>Scopes : {auth.scopes.join(', ')}</p>
+      <form action="/api/oauth/decision" method="POST">
+        <input type="hidden" name="id" value={searchParams.id} />
+        <button name="decision" value="approve">Autoriser</button>
+        <button name="decision" value="deny">Refuser</button>
+      </form>
+    </div>
+  );
+}
+```
+
+Et la route qui traite la décision :
+
+```typescript
+// app/api/oauth/decision/route.ts
+export async function POST(request) {
+  const form = await request.formData();
+  const id = form.get('id');
+  const decision = form.get('decision');
+  const supabase = await createClient();
+
+  if (decision === 'approve') {
+    const { data } = await supabase.auth.oauth.approveAuthorization(id);
+    return redirect(data.redirect_to);
+  } else {
+    await supabase.auth.oauth.denyAuthorization(id);
+    return redirect('/');
+  }
+}
+```
+
+C'est tout. Pas de JWKS à gérer, pas de tokens à signer, pas de sessions à stocker. Les 3 fonctions clés sont :
+
+- `getAuthorizationDetails(id)` — récupère les infos du client et les scopes demandés
+- `approveAuthorization(id)` — Supabase émet les tokens et renvoie l'URL de callback
+- `denyAuthorization(id)` — Supabase annule la demande
+
+## Côté client : next-auth v5 en 3 fichiers
+
+Chaque sous-app qui veut se connecter via My-Monkey utilise **next-auth v5** avec un provider OIDC custom. La config :
+
+```typescript
+// auth.ts
+import NextAuth from "next-auth";
+
+export const { handlers, auth, signIn, signOut } = NextAuth({
+  providers: [{
+    id: "mymonkey",
+    name: "My-Monkey",
+    type: "oidc",
+    issuer: process.env.MYMONKEY_ISSUER,       // https://<ref>.supabase.co/auth/v1
+    clientId: process.env.MYMONKEY_CLIENT_ID,
+    clientSecret: process.env.MYMONKEY_CLIENT_SECRET,
+  }],
+});
+```
+
+<Callout type="info">
+Le `type: "oidc"` fait tout le travail. next-auth fetch le `/.well-known/openid-configuration` de Supabase, en déduit les endpoints authorize/token/userinfo/jwks, et gère le flow PKCE automatiquement.
+</Callout>
+
+L'UI de login se résume à un bouton :
+
+```tsx
+import { signIn } from "next-auth/react";
+<button onClick={() => signIn("mymonkey")}>Se connecter</button>
+```
+
+## Le cookie qui fait le SSO
+
+Le vrai SSO vient d'un détail : les cookies Supabase Auth sont posés sur **`.my-monkey.fr`** (avec le point). Grâce à l'env var `SUPABASE_COOKIE_DOMAIN=.my-monkey.fr` sur auth-mymonkey.
+
+Ça veut dire : si tu te connectes sur `auth.my-monkey.fr`, le cookie est lisible par `fapmap.my-monkey.fr`, `kebab.my-monkey.fr`, `blog.my-monkey.fr`, etc. Quand une app vérifie ta session, le cookie est déjà là. Pas de redirect OAuth nécessaire pour les visites suivantes.
+
+## Les gotchas (il y en a eu 9)
+
+La mise en place était rapide. Le déploiement sur O2switch, beaucoup moins. Voici les pièges les plus vicieux.
+
+### Next.js standalone ne charge pas `.env.local`
+
+Si ton `.monkey` déploie le dossier `.next/standalone/`, le serveur standalone de Next.js **ne lit pas** les fichiers `.env*`. Le fichier est bien dans le dossier, mais Node ne le charge pas.
+
+Fix : un wrapper `server.js` qui fait `loadEnvFile('.env.local')` avant de `require('./_next-server.js')`.
+
+<CodeDiff
+  lang="bash"
+  beforeLabel="Ce qu'on croit"
+  afterLabel="Ce qui se passe"
+  before={`.next/standalone/
+  server.js          ← Next.js natif, lit process.env
+  .env.local         ← présent dans le dossier
+  # → process.env.AUTH_SECRET = "mon-secret" ✓`}
+  after={`.next/standalone/
+  server.js          ← Next.js natif, ne charge PAS .env*
+  .env.local         ← présent mais ignoré
+  # → process.env.AUTH_SECRET = undefined ✗
+  # → TypeError: Invalid URL (next-auth crash)`}
+/>
+
+### CSRF cookie storm → 403 Cloudflare
+
+Le middleware de next-auth (`export default auth(handler)`) pose un cookie `__Host-authjs.csrf-token` à **chaque requête**. Quand tu le composes avec next-intl (qui redirige selon la locale), le middleware s'exécute 2-3 fois par navigation. Résultat : 10+ headers `Set-Cookie` identiques dans la même réponse.
+
+Cloudflare voit les headers dépasser 8 KB et répond **403**. Aucun log côté Next, aucune erreur, juste un 403 opaque.
+
+<Callout type="fix">
+Ne PAS wrapper le middleware avec `auth()` globalement. Appeler `auth()` inline uniquement sur les routes protégées. Le cookie CSRF n'est posé que quand c'est nécessaire.
+</Callout>
+
+```typescript
+// ❌ Cassé — CSRF sur chaque requête
+export default auth(intlMiddleware);
+
+// ✅ Correct — auth() seulement quand c'est utile
+export async function middleware(request) {
+  if (isProtectedRoute(request.nextUrl.pathname)) {
+    const session = await auth();
+    if (!session) return redirect('/');
+  }
+  return intlMiddleware(request);
+}
+```
+
+### Le button `disabled` qui tue le submit
+
+Celui-là m'a pris des heures. Sur la page de consentement, le bouton "Autoriser" ne faisait... rien. Pas d'erreur, pas de redirect, rien.
+
+La cause : `<button type="submit" disabled={pending} onClick={() => setPending(true)}>`. En React 19, le re-render est synchrone dans le même tick que le click. Le bouton passe `disabled` **avant** que le navigateur ne dispatche la submission. Et un bouton `disabled` ne déclenche pas de submit.
+
+<CodeDiff
+  lang="tsx"
+  beforeLabel="Cassé (silencieusement)"
+  afterLabel="Fix"
+  before={`<button
+  type="submit"
+  disabled={pending}
+  onClick={() => setPending(true)}
+>
+  Autoriser
+</button>`}
+  after={`<button
+  type="submit"
+  className={pending ? 'pointer-events-none opacity-60' : ''}
+  onClick={() => setPending(true)}
+>
+  Autoriser
+</button>`}
+/>
+
+Le `disabled` HTML est remplacé par du CSS cosmétique. Le submit natif fonctionne, le double-clic est bloqué visuellement.
+
+### `AUTH_URL` obligatoire derrière un reverse-proxy
+
+Sans cette env var, next-auth essaie de deviner l'URL depuis les headers HTTP. Derrière Apache (O2switch) ou Cloudflare, les headers `Host` et `X-Forwarded-*` ne sont pas ce que next-auth attend. Résultat : `TypeError: Invalid URL` dans le middleware, et 500 partout.
+
+`AUTH_TRUST_HOST=true` ne suffit pas. Il faut `AUTH_URL=https://ton-domaine.fr` explicite.
+
+## Le résultat
+
+7 apps migrées en 2 jours. Le flow côté utilisateur :
+
+1. Tu arrives sur `fapmap.my-monkey.fr`, tu cliques "Connexion"
+2. Tu atterris sur `auth.my-monkey.fr`, tu te connectes (email/password ou Google)
+3. Page de consentement : "Fapmap veut accéder à votre compte" → Autoriser
+4. Tu es renvoyé sur Fapmap, connecté
+5. Tu vas sur `kebab.my-monkey.fr` → **déjà connecté** (cookie `.my-monkey.fr`)
+
+Le tout tient sur un seul projet Supabase, une app Next.js de ~150 lignes utiles, et zéro infra OIDC custom.
+
+<Callout type="info" label="TL;DR">
+Si tu utilises Supabase et que tu as besoin d'un SSO entre plusieurs apps sur le même domaine : ne monte pas un IdP. Active le OAuth 2.1 Server de Supabase, écris une page de consentement, et branche tes apps avec next-auth v5 `type: "oidc"`. C'est 10× moins de code et d'ops qu'un OIDC provider self-hosted.
+</Callout>
