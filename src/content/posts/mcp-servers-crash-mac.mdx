@@ -348,6 +348,8 @@ C'est une app SwiftUI de ~300 lignes, compilée avec Swift Package Manager, zér
 - **Boutons kill** : un clic pour tuer tous les PostCSS workers ou tous les MCP servers
 - **Auto-kill configurable** : sliders pour ajuster le seuil (nombre de workers et GB de RAM)
 
+![Claude Monitor menu bar app](./_assets/claude-monitor.png)
+
 L'auto-kill vérifie toutes les 5 secondes. Si les PostCSS dépassent le seuil ou que la RAM explose, il les tue avant que le Mac ne crash. C'est le watchdog bash, mais en app native, toujours visible, toujours actif.
 
 Le code est dans [`my-monkeys/claude-monitor`](https://github.com/my-monkeys/claude-monitor) — un `swift build -c release` et c'est installé.
