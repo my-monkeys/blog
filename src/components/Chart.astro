@@ -1,0 +1,151 @@
+---
+export interface Props {
+  type: 'line' | 'bar' | 'pie' | 'doughnut' | 'radar' | 'scatter';
+  data: string;
+  options?: string;
+  caption?: string;
+  height?: string;
+}
+const { type, data, options, caption, height = '360px' } = Astro.props;
+---
+
+<figure class="chart-figure">
+  <div class="chart-wrapper" style={`height:${height}`}>
+    <canvas
+      class="chart-canvas"
+      data-chart-type={type}
+      data-chart-data={data}
+      data-chart-options={options || '{}'}
+    ></canvas>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  let chartjsPromise: Promise<typeof import('chart.js')> | null = null;
+
+  async function getChartJS() {
+    if (!chartjsPromise) {
+      chartjsPromise = import('chart.js').then((m) => {
+        m.Chart.register(
+          m.LineController, m.BarController, m.PieController,
+          m.DoughnutController, m.RadarController, m.ScatterController,
+          m.CategoryScale, m.LinearScale, m.RadialLinearScale,
+          m.PointElement, m.LineElement, m.BarElement, m.ArcElement,
+          m.Filler, m.Legend, m.Title, m.Tooltip,
+        );
+        return m;
+      });
+    }
+    return chartjsPromise;
+  }
+
+  function getThemeColors() {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    return {
+      text: isDark ? '#F5EFE0' : '#1E1E1E',
+      textSoft: isDark ? '#A8A29A' : '#4A4A4A',
+      grid: isDark ? 'rgba(245,239,224,0.08)' : 'rgba(30,30,30,0.08)',
+      bg: isDark ? '#0E0E10' : '#FFFBEB',
+    };
+  }
+
+  function applyTheme(chart: any) {
+    const colors = getThemeColors();
+    const scales = chart.options.scales || {};
+    for (const key of Object.keys(scales)) {
+      if (scales[key].ticks) scales[key].ticks.color = colors.textSoft;
+      if (scales[key].grid) scales[key].grid.color = colors.grid;
+      if (scales[key].title) scales[key].title.color = colors.textSoft;
+    }
+    if (chart.options.plugins?.legend?.labels) {
+      chart.options.plugins.legend.labels.color = colors.textSoft;
+    }
+    if (chart.options.plugins?.title) {
+      chart.options.plugins.title.color = colors.text;
+    }
+    chart.update('none');
+  }
+
+  async function renderAll() {
+    const canvases = document.querySelectorAll<HTMLCanvasElement>(
+      'canvas.chart-canvas:not([data-rendered])'
+    );
+    if (canvases.length === 0) return;
+    const { Chart } = await getChartJS();
+    const colors = getThemeColors();
+
+    for (const canvas of canvases) {
+      canvas.dataset.rendered = '1';
+      const type = canvas.dataset.chartType as any;
+      let data: any, options: any;
+      try {
+        data = JSON.parse(canvas.dataset.chartData || '{}');
+        options = JSON.parse(canvas.dataset.chartOptions || '{}');
+      } catch (e) {
+        console.error('[chart] invalid JSON:', e);
+        continue;
+      }
+
+      options.responsive = true;
+      options.maintainAspectRatio = false;
+      options.animation = { duration: 600, easing: 'easeOutQuart' };
+
+      if (!options.plugins) options.plugins = {};
+      if (!options.plugins.legend) options.plugins.legend = {};
+      if (!options.plugins.legend.labels) options.plugins.legend.labels = {};
+      options.plugins.legend.labels.color = colors.textSoft;
+      options.plugins.legend.labels.font = { family: "'Space Grotesk', system-ui, sans-serif", size: 12 };
+
+      if (options.plugins.title) {
+        options.plugins.title.color = colors.text;
+        options.plugins.title.font = { family: "'Space Grotesk', system-ui, sans-serif", weight: '700', size: 14 };
+      }
+
+      const scales = options.scales || {};
+      for (const key of Object.keys(scales)) {
+        if (!scales[key].ticks) scales[key].ticks = {};
+        scales[key].ticks.color = colors.textSoft;
+        scales[key].ticks.font = { family: "'JetBrains Mono', monospace", size: 11 };
+        if (!scales[key].grid) scales[key].grid = {};
+        scales[key].grid.color = colors.grid;
+        if (scales[key].title) {
+          scales[key].title.color = colors.textSoft;
+          scales[key].title.font = { family: "'Space Grotesk', system-ui, sans-serif", size: 12 };
+        }
+      }
+
+      const chart = new Chart(canvas, { type, data, options });
+      (canvas as any).__chart = chart;
+    }
+  }
+
+  const obs = new MutationObserver(() => {
+    document.querySelectorAll<HTMLCanvasElement>('canvas.chart-canvas[data-rendered]').forEach((c) => {
+      const chart = (c as any).__chart;
+      if (chart) applyTheme(chart);
+    });
+  });
+  obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+  document.addEventListener('astro:page-load', renderAll);
+</script>
+
+<style>
+  .chart-figure {
+    margin: 2em 0;
+  }
+  .chart-wrapper {
+    position: relative;
+    border: 2px solid var(--ink);
+    background: var(--bg-elev);
+    padding: 1.25rem;
+  }
+  .chart-figure figcaption {
+    margin-top: 0.5rem;
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+</style>

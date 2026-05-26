@@ -1,9 +1,9 @@
 ---
-title: "50 serveurs MCP zombies qui crashaient mon Mac"
+title: "Comment j'ai traqué un memory leak qui crashait mon Mac 5 fois en 2 heures"
 date: 2026-05-26
 type: post-mortem
-excerpt: "Mon MacBook plantait en boucle. La cause : un plugin Claude Code qui spawnait des dizaines de processus orphelins à chaque session, saturant les 16 GB de RAM."
-tags: ["claude-code", "mcp", "debug", "macos"]
+excerpt: "Mon MacBook 16 GB plantait en boucle. J'ai accusé les MCP servers, un plugin Claude Code, le navigateur Dia — avant de découvrir que le vrai coupable spawnait 2261 processus en 50 secondes."
+tags: ["debug", "macos", "claude-code", "nextjs", "tailwind", "postcss"]
 draft: false
 ---
 
@@ -11,170 +11,328 @@ import Mortem from '@/components/Mortem.astro';
 import Mermaid from '@/components/Mermaid.astro';
 import CodeDiff from '@/components/CodeDiff.astro';
 import Callout from '@/components/Callout.astro';
+import Chart from '@/components/Chart.astro';
 
 <Mortem
-  symptom="MacBook Pro 16 GB crashe en boucle. macOS force-kill des apps au hasard, swap explose à 2 GB+, le système devient inutilisable en quelques minutes."
-  cause="Le plugin claude-brain-sync spawne un subagent `claude -p` (avec tous ses MCP servers) à chaque démarrage de session via un hook `evolve --auto`. Les processus ne meurent pas quand la session parente crash — ils s'accumulent. 4 sessions = 6 subagents × ~25 MCP servers chacun = 50+ processus zombie."
-  fix="Kill des processus orphelins (`kill` sur les PID brain-sync), désinstallation du plugin (`claude plugin remove claude-brain-sync`). RAM : 18.2 GB → 12.9 GB instantanément."
+  symptom="MacBook Pro 16 GB crashe en boucle (5 fois en 2h). macOS force-kill des apps, swap explose à 15 GB, le système se fige. Erreur forkpty: Resource temporarily unavailable — plus aucun terminal ne s'ouvre."
+  cause="@tailwindcss/postcss + Next.js 16 spawn un worker PostCSS par fichier CSS à recompiler, sans limite. Au premier hot-reload, cascade exponentielle : 0 → 283 → 651 → 2261 workers en 50 secondes. Chaque worker fait ~35 MB. Total : 77 GB de RAM demandée sur 16 GB physiques."
+  fix="Désinstaller @tailwindcss/postcss (npm uninstall), supprimer postcss.config.mjs, retirer --turbopack du dev script. Next.js 16 gère Tailwind v4 nativement via @import 'tailwindcss' sans plugin PostCSS."
 />
+
+Cet article raconte une investigation de 2 heures avec 3 fausses pistes, un watchdog custom, et 5 crashes système avant d'identifier le vrai coupable.
 
 ## Le symptôme
 
-Mon Mac crash. Encore. Pour la troisième fois en une heure.
+Mon Mac crash. Encore. Pour la cinquième fois aujourd'hui.
 
 Pas un kernel panic propre — le genre de crash mou où macOS commence par tuer Safari, puis le Finder, puis se fige complètement. Le ventilateur hurle. Force reboot, ça repart 10 minutes, ça recrashe.
 
-J'ouvre un terminal et je regarde les basics :
+## Suspect 1 : les MCP servers zombies
+
+Premier check après le reboot :
 
 ```bash
 ps aux -m | awk 'NR>1 {sum+=$6} END {printf "RAM: %.1f GB\n", sum/1024/1024}'
 # RAM: 18.2 GB
 
-sysctl vm.swapusage
-# total = 3072.00M  used = 1868.44M  free = 1203.56M
-```
-
-18 GB de RSS sur une machine qui en a 16. Presque 2 GB de swap. macOS compresse en mémoire ce qu'il peut, mais il n'y a plus rien à compresser.
-
-## L'enquête
-
-Premier réflexe : qu'est-ce qui mange autant ?
-
-```bash
 ps aux | grep 'claude' | grep -v grep | wc -l
 # 10
 ```
 
-10 processus Claude. J'en ai ouvert **un seul** terminal.
+18 GB de RSS sur une machine qui en a 16. Et 10 processus Claude alors que j'en ai lancé un seul. Le coupable semble évident.
 
-```bash
-ps aux | grep -E 'npm exec|mcp' | grep -v grep | wc -l
-# 50
-```
+En creusant, je découvre que le plugin **claude-brain-sync** spawne 6 subagents `claude -p` à chaque session, chacun chargeant l'intégralité des ~25 MCP servers configurés globalement. 50+ processus zombie. Je kill tout, je désinstalle le plugin. RAM : 18.2 → 12.9 GB.
 
-50 serveurs MCP. 50.
+Victoire.
 
-## Le coupable
+Sauf que 20 minutes plus tard, ça recrashe.
 
-En détaillant les processus Claude, le pattern saute aux yeux :
+## Suspect 2 : les apps au démarrage
 
-```bash
-PID 2768   claude --dangerously-skip-permissions --resume   # ← ma session
-PID 6634   claude -p "You are analyzing a person's Claude Code brain..."
-PID 10440  claude -p "You are analyzing a person's Claude Code brain..."
-PID 17129  claude -p "You are analyzing a person's Claude Code brain..."
-PID 21303  claude -p "You are analyzing a person's Claude Code brain..."
-PID 25119  claude -p "You are analyzing a person's Claude Code brain..."
-PID 28953  claude -p "You are analyzing a person's Claude Code brain..."
-```
+Je fais l'inventaire des login items — 12 apps au boot. SuperWhisper (1.66 GB), Dia (~1.1 GB), Beeper (435 MB). Ça fait 3.2 GB bouffés avant même d'ouvrir un terminal. Je nettoie : 7 apps retirées, 3 LaunchAgents orphelins supprimés (FigmaAgent sans Figma, CleanMyMac sans CleanMyMac, OpenClaw sans OpenClaw).
 
-6 instances `claude -p` identiques lancées par le plugin **claude-brain-sync**. Chacune est un subagent `evolve --auto` qui "analyse le cerveau pour promouvoir des patterns" — une sorte de maintenance automatique de la mémoire.
+Mieux, mais ça recrashe quand même.
 
-En parallèle, des dizaines de scripts bash orphelins :
+## Suspect 3 : le navigateur Dia
 
-```bash
-PID 10439  bash evolve.sh --auto
-PID 10428  bash evolve.sh --auto
-PID 6633   bash evolve.sh --auto
-PID 6622   bash evolve.sh --auto
-# ... 12 au total
-
-PID 6659   bash pull.sh --quiet
-PID 2957   bash pull.sh --quiet
-# ... 6 au total
-```
-
-Le merge-log confirme la frénésie — parfois 4 syncs en 40 secondes :
+Je construis un **watchdog** — un script bash qui log la RAM toutes les 5 secondes et dump un rapport complet quand ça dépasse un seuil. Premier spike capturé :
 
 ```
-[2026-05-25T22:35:49Z] pull+merge: Merged 1 machine snapshots
-[2026-05-25T22:35:50Z] pull+merge: Merged 1 machine snapshots
-[2026-05-25T22:36:00Z] pull+merge: Merged 1 machine snapshots
-[2026-05-25T22:52:19Z] pull+merge: Merged 1 machine snapshots
+11:21:13  RAM:13.6GB   ← tout va bien
+11:21:19  RAM:20.3GB   ← +7 GB en 6 secondes
+11:21:24  RAM:25.6GB
+11:21:33  RAM:34.6GB
+11:21:41  RAM:42.8GB
+11:21:49  RAM:51.9GB
+11:21:57  RAM:62.4GB
+11:22:05  RAM:72.1GB   ← 72 GB en 50 secondes
 ```
+
+De 13.6 à 72 GB en moins d'une minute. Le snapshot montre ~25 processus Dia (navigateur). Je pointe Dia du doigt.
+
+Mais quelque chose cloche : le snapshot ne montre que ~1.5 GB de processus identifiés pour 72 GB reportés. Et Dia tourne sans problème le reste du temps.
+
+## Le watchdog v2 : les noms de processus
+
+J'améliore le watchdog pour agréger la RAM par application. Au prochain spike, les logs montrent la vérité :
+
+```
+11:41:11  PostCSS:0    RAM:14.4GB   ← normal
+11:41:17  PostCSS:283  RAM:18.5GB   ← 283 workers apparaissent
+11:41:23  PostCSS:561  RAM:26.9GB   ← doublent en 6 secondes
+11:41:31  PostCSS:884  RAM:36.5GB
+11:41:40  PostCSS:1183 RAM:46.8GB
+11:41:48  PostCSS:1531 RAM:57.2GB
+11:42:05  PostCSS:2261 RAM:79.4GB   ← 2261 workers
+```
+
+<Chart
+  type="line"
+  height="400px"
+  caption="RAM et workers PostCSS — spike 3 (données watchdog, interval 5s)"
+  data={JSON.stringify({
+    labels: ['11:41:11','11:41:17','11:41:23','11:41:31','11:41:40','11:41:48','11:41:56','11:42:05'],
+    datasets: [
+      {
+        label: 'RAM (GB)',
+        data: [14.4, 18.5, 26.9, 36.5, 46.8, 57.2, 68.2, 79.4],
+        borderColor: '#FF5E78',
+        backgroundColor: 'rgba(255,94,120,0.1)',
+        borderWidth: 2,
+        fill: true,
+        tension: 0.3,
+        yAxisID: 'y'
+      },
+      {
+        label: 'PostCSS workers',
+        data: [0, 283, 561, 884, 1183, 1531, 1911, 2261],
+        borderColor: '#FFB347',
+        backgroundColor: 'rgba(255,179,71,0.1)',
+        borderWidth: 2,
+        fill: true,
+        tension: 0.3,
+        yAxisID: 'y1'
+      }
+    ]
+  })}
+  options={JSON.stringify({
+    scales: {
+      y: { position: 'left', title: { display: true, text: 'RAM (GB)' }, min: 0 },
+      y1: { position: 'right', title: { display: true, text: 'Workers' }, min: 0, grid: { drawOnChartArea: false } }
+    }
+  })}
+/>
+
+<Chart
+  type="bar"
+  height="320px"
+  caption="RAM par application au pic (30.8 GB) — spike 3"
+  data={JSON.stringify({
+    labels: ['PostCSS', 'Dia', 'MCP servers', 'Claude', 'Next.js', 'Autres'],
+    datasets: [{
+      label: 'RAM (MB)',
+      data: [23229, 2114, 1830, 363, 295, 500],
+      backgroundColor: ['#FF5E78','#FFB347','#5B9DD9','#2ECC71','#C2410C','#A8A29A'],
+      borderColor: '#F5EFE0',
+      borderWidth: 1
+    }]
+  })}
+  options={JSON.stringify({
+    indexAxis: 'y',
+    plugins: { legend: { display: false } },
+    scales: { x: { title: { display: true, text: 'RAM (MB)' } } }
+  })}
+/>
+
+Le coupable n'était ni les MCP, ni Dia, ni les login items. C'était **`@tailwindcss/postcss`** dans un projet Next.js 16 qui spawnait des milliers de workers sans limite.
+
+<Chart
+  type="line"
+  height="340px"
+  caption="RAM sur 50 minutes — les 3 spikes et l'effet du watchdog auto-kill"
+  data={JSON.stringify({
+    labels: [
+      '11:11','11:12','11:13','11:13:30','11:14','11:14:30','11:15',
+      '','11:20','11:21','11:21:30','11:22',
+      '','11:41','11:41:20','11:41:40','11:42',
+      '11:48','11:48:30','11:48:40','11:49'
+    ],
+    datasets: [
+      {
+        label: 'RAM (GB)',
+        data: [
+          16.7, 17.8, 26.0, 35.3, 24.0, 8.1, 5.5,
+          null, 13.1, 20.3, 42.8, 72.1,
+          null, 14.4, 18.5, 46.8, 79.4,
+          10.3, 15.6, 30.8, 11.2
+        ],
+        borderColor: '#FF5E78',
+        backgroundColor: 'rgba(255,94,120,0.08)',
+        borderWidth: 2,
+        fill: true,
+        tension: 0.2,
+        spanGaps: false
+      },
+      {
+        label: 'Seuil physique (16 GB)',
+        data: Array(21).fill(16),
+        borderColor: 'rgba(255,179,71,0.5)',
+        borderWidth: 1,
+        borderDash: [6,4],
+        pointRadius: 0,
+        fill: false,
+        spanGaps: true
+      }
+    ]
+  })}
+  options={JSON.stringify({
+    scales: {
+      y: { title: { display: true, text: 'RAM (GB)' }, min: 0, max: 85 }
+    },
+    plugins: {
+      legend: { position: 'bottom' }
+    }
+  })}
+/>
 
 ## Le mécanisme de la bombe
 
 <Mermaid
-  caption="Comment 1 session Claude Code devient 50+ processus"
+  caption="Comment 1 hot-reload devient 2261 processus"
   code={`
 flowchart TD
-  Session["Session Claude Code<br/>1 processus"] -->|hook session_start| Evolve["evolve.sh --auto<br/>2 scripts bash"]
-  Evolve -->|spawn| SubAgent["claude -p 'analyze brain...'<br/>1 processus Node"]
-  SubAgent -->|charge tous les MCP| MCP1["firebase-tools<br/>~300 MB"]
-  SubAgent --> MCP2["playwright<br/>~90 MB"]
-  SubAgent --> MCP3["dart LSP<br/>~300 MB"]
-  SubAgent --> MCP4["clockify<br/>~90 MB"]
-  SubAgent --> MCP5["ios-simulator<br/>~90 MB"]
-  SubAgent --> MCP6["+ 8 autres..."]
-  Evolve -->|spawn| Pull["pull.sh --quiet"]
+  Dev["npm run dev<br/>(Next.js 16)"] --> Server["next-server<br/>~300 MB"]
+  Server -->|"hot-reload<br/>fichier modifié"| PostCSS["@tailwindcss/postcss"]
+  PostCSS -->|"1 worker par import CSS"| W1["postcss.js worker #1<br/>~35 MB"]
+  PostCSS --> W2["postcss.js worker #2<br/>~35 MB"]
+  PostCSS --> W3["postcss.js worker #3<br/>~35 MB"]
+  PostCSS --> WN["... worker #2261<br/>~35 MB"]
+  
+  W1 -.->|"jamais tué"| LEAK["Workers s'accumulent<br/>pas de limite, pas de pool"]
+  W2 -.-> LEAK
+  W3 -.-> LEAK
+  WN -.-> LEAK
+  LEAK --> OOM["79 GB demandé<br/>sur 16 GB physiques<br/>→ swap spiral → crash"]
 
-  Session -.->|"crash → reboot<br/>processus orphelins<br/>restent vivants"| Evolve
-
-  style Session fill:#2ECC71,color:#0E0E10
-  style SubAgent fill:#FF5E78,color:#0E0E10
-  style MCP1 fill:#FF5E78,color:#0E0E10
-  style MCP2 fill:#FF5E78,color:#0E0E10
-  style MCP3 fill:#FF5E78,color:#0E0E10
-  style MCP4 fill:#FF5E78,color:#0E0E10
-  style MCP5 fill:#FF5E78,color:#0E0E10
-  style MCP6 fill:#FF5E78,color:#0E0E10
+  style PostCSS fill:#FF5E78,color:#0E0E10
+  style LEAK fill:#FF5E78,color:#0E0E10
+  style OOM fill:#FF5E78,color:#0E0E10
+  style W1 fill:#FF5E78,color:#0E0E10
+  style W2 fill:#FF5E78,color:#0E0E10
+  style W3 fill:#FF5E78,color:#0E0E10
+  style WN fill:#FF5E78,color:#0E0E10
 `}
 />
 
-Le problème est double :
+`@tailwindcss/postcss` spawne un worker Node.js par fichier CSS résolu lors d'une recompilation. Next.js 16 en dev recompile agressivement au moindre changement. Chaque worker fait ~35 MB. Les workers ne sont pas poolés ni limités — ils s'empilent.
 
-1. **Chaque subagent `claude -p` charge tous les MCP servers configurés globalement** — y compris ceux dont il n'a absolument pas besoin (Dart LSP, iOS Simulator, Minecraft schematic builder... pour "analyser un brain"). Sur ma config, ça fait ~25 MCP servers, soit **~2 GB par subagent**.
+Le résultat en timeline :
 
-2. **Les processus survivent au crash de la session parente.** Quand macOS force-kill ma session Claude sous pression mémoire, les subagents et leurs MCP restent orphelins. Au reboot de la session, le hook relance un nouveau batch. Les anciens sont toujours là. En 3-4 crashs, on arrive à 50+ processus.
+<Mermaid
+  caption="Progression de la RAM sur les 3 spikes de la journée"
+  code={`
+gantt
+    title RAM (GB) — 3 spikes en 2 heures
+    dateFormat HH:mm
+    axisFormat %H:%M
+    
+    section Spike 1 (PostCSS)
+    17→35 GB, crash     :crit, 11:12, 2m
+    macOS kill + reboot  :done, 11:14, 2m
+
+    section Spike 2 (PostCSS + Dia)
+    13→72 GB en 50s     :crit, 11:21, 1m
+    crash système       :crit, 11:22, 1m
+    
+    section Spike 3 (watchdog v3)
+    10→31 GB            :crit, 11:48, 1m
+    auto-kill sauve     :done, 11:49, 1m
+`}
+/>
 
 ## Le fix
 
-Étape 1 — kill immédiat :
+Trois lignes :
 
 ```bash
-ps aux | grep 'claude-brain-sync\|claude -p You' | grep -v grep \
-  | awk '{print $2}' | xargs kill
-```
+# 1. Désinstaller le plugin PostCSS (le vrai coupable)
+npm uninstall @tailwindcss/postcss
 
-Résultat instantané :
+# 2. Supprimer le fichier de config PostCSS
+rm postcss.config.mjs
+
+# 3. Retirer Turbopack du dev script (aggravait le bug)
+# package.json: "dev": "next dev" (au lieu de "next dev --turbopack")
+```
 
 <CodeDiff
-  lang="bash"
-  beforeLabel="Avant : 50+ processus, 18.2 GB"
-  afterLabel="Après : 1 session, 12.9 GB"
-  caption="Impact du nettoyage"
-  before={`Claude instances:  10
-MCP servers:      50+
-RAM used:         18.2 GB
-Swap used:        1868 MB`}
-  after={`Claude instances:  1
-MCP servers:      10
-RAM used:         12.9 GB
-Swap used:        0 MB`}
+  lang="json"
+  beforeLabel="Avant : bombe à retardement"
+  afterLabel="Après : stable"
+  caption="package.json"
+  before={`{
+  "scripts": {
+    "dev": "next dev --turbopack"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
+    "tailwindcss": "^4.3.0",
+    "next": "^16.2.6"
+  }
+}`}
+  after={`{
+  "scripts": {
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "tailwindcss": "^4.3.0",
+    "next": "^16.2.6"
+  }
+}`}
 />
 
-Étape 2 — désinstaller le plugin :
+Pourquoi ça marche sans le plugin ? Tailwind v4 s'active via `@import "tailwindcss"` dans le CSS. Next.js 16 sait résoudre cet import nativement — le plugin PostCSS est **redondant** et c'est lui qui crée les workers.
 
-```bash
-claude plugin remove claude-brain-sync@claude-brain-sync
-# ✔ Successfully uninstalled plugin: claude-brain-sync (scope: user)
+Résultat après le fix :
+
+```
+11:51:21  PostCSS:1  NextServer(1x567MB)  ← dev server lancé
+11:51:32  PostCSS:0  NextServer(1x523MB)  ← compilation terminée
+11:52:47  PostCSS:0  NextServer(1x498MB)  ← stable, 9.3 GB total
 ```
 
-## La leçon
+1 worker PostCSS temporaire au lieu de 2261. Pas de fuite.
 
-<Callout type="warn">
-Les plugins Claude Code qui utilisent des hooks `session_start` pour spawner des subagents (`claude -p`) sont une bombe à retardement sur les machines avec beaucoup de MCP servers configurés globalement. Chaque subagent hérite de **tous** les MCP servers, même s'il n'en utilise aucun.
+## Le watchdog
+
+Le script qui a permis de résoudre ça : un bash de 120 lignes qui tourne dans un terminal.
+
+```bash
+# ~/bin/claude-watchdog.sh — toutes les 5 secondes :
+# 1. Log RAM, swap, Claude count, MCP count, PostCSS count
+# 2. Top 5 apps par RAM (agrégé par nom)
+# 3. Si > 25 GB → dump un rapport complet (RAM par app, memory pressure, swap)
+# 4. Si > 20 GB → auto-kill des PostCSS workers + next dev servers
+```
+
+La timeline qu'il produit est ce qui a permis de voir que le spike passait de 0 à 283 PostCSS workers en 6 secondes — invisible sans monitoring continu.
+
+<Callout type="fix">
+Si tu utilises `@tailwindcss/postcss` avec Next.js 16 : **désinstalle-le**. Remplace par un simple `@import "tailwindcss"` dans ton CSS global. Le plugin spawn des workers sans limite et peut consommer 77 GB de RAM en moins d'une minute sur un hot-reload.
+
+C'est un [bug connu](https://github.com/vercel/next.js/discussions/77102) — Turbopack + PostCSS workers = cascade exponentielle.
 </Callout>
 
-Trois choses à retenir :
+## Ce que j'ai appris
 
-**1. Surveille le nombre de processus Claude.** Si `ps aux | grep claude | wc -l` retourne plus que le nombre de terminaux ouverts, il y a un problème.
+**1. Le premier suspect est rarement le bon.** J'ai accusé les MCP servers, un plugin Claude Code, les login items, et un navigateur avant de trouver le vrai coupable. Chacun avait l'air coupable sur le moment.
 
-**2. Déplace les MCP spécialisés du global vers le projet.** Dart LSP n'a rien à faire dans un projet Next.js. Firebase n'a rien à faire dans un projet Flutter. Moins de MCP globaux = moins de RAM par session = moins de dégâts en cas de fuite.
+**2. Sans monitoring, tu debuggues à l'aveugle.** Les 4 premiers crashes m'ont donné zéro information utile — macOS kill les processus avant que tu puisses les inspecter. Le watchdog a tout changé : 5 secondes entre chaque snapshot, agrégation par app, timeline lisible.
 
-**3. Méfie-toi des hooks auto.** Un hook `session_start` qui spawn un processus lourd doit impérativement nettoyer les instances précédentes avant d'en créer de nouvelles. Sinon, le premier crash déclenche une cascade.
+**3. `ps aux` ne montre pas tout.** Le RSS reporté par `ps` ne compte pas la mémoire compressée, les pages mappées kernel-side, ni le swap inflight. Un process à "35 MB" peut consommer bien plus en réalité. `vm_stat` et `sysctl vm.swapusage` racontent une histoire différente.
+
+**4. Les cascades sont silencieuses.** 2261 processus en 50 secondes, et le seul symptôme visible c'est "le Mac rame". Pas d'alerte, pas de log, pas de notification. macOS n'a aucun mécanisme pour dire "hey, un process vient de forker 500 enfants en 10 secondes, c'est normal ?"
 
 <Callout type="info" label="TL;DR">
-Si ton Mac crash en boucle avec Claude Code ouvert → `ps aux | grep claude | wc -l`. Si le nombre est anormal, cherche quel plugin spawne des subagents orphelins, kill-les, et désinstalle le coupable.
+Si ton Mac crash en boucle avec un projet Next.js + Tailwind v4 ouvert : `ps aux | grep postcss | wc -l`. Si le nombre est > 5, tue tout (`pkill -f postcss`) et désinstalle `@tailwindcss/postcss`. Le plugin est redondant avec Next.js 16.
 </Callout>
