@@ -1,68 +1,156 @@
 ---
-// Giscus comments — backed by GitHub Discussions on my-monkeys/blog.
-// Requires the giscus GitHub App to be installed on the repo
-// (https://github.com/apps/giscus). Without it, the iframe loads but
-// posting won't work.
-//
-// Theme follows the user's data-theme attribute and updates on toggle.
+// Comments — custom Supabase-backed system, no login required.
+// Table: blog_comments (project MyMonkey / klliwmgdyuatstjvzzbb)
 ---
 
 <section class="comments" aria-label="Commentaires">
   <h2 class="section-heading">Commentaires</h2>
-  <p class="comments-intro">
-    Login GitHub pour réagir. Backed by <a href="https://github.com/my-monkeys/blog/discussions" rel="external">GitHub Discussions</a>.
-  </p>
-  <div class="giscus"></div>
+
+  <form class="comment-form" data-comment-form>
+    <div class="comment-form-row">
+      <input
+        type="text"
+        name="author_name"
+        placeholder="Ton nom"
+        required
+        maxlength="80"
+        autocomplete="name"
+        class="comment-input"
+      />
+    </div>
+    <textarea
+      name="message"
+      placeholder="Ton commentaire…"
+      required
+      maxlength="2000"
+      rows="3"
+      class="comment-textarea"
+    ></textarea>
+    <div class="comment-form-footer">
+      <span class="comment-error" data-comment-error></span>
+      <button type="submit" class="comment-submit">Envoyer</button>
+    </div>
+  </form>
+
+  <div class="comment-list" data-comment-list>
+    <p class="comment-loading">Chargement…</p>
+  </div>
 </section>
 
 <script is:inline>
   (function () {
-    function pickTheme() {
-      return document.documentElement.getAttribute('data-theme') === 'dark'
-        ? 'dark_dimmed'
-        : 'light';
+    var SUPABASE_URL = 'https://klliwmgdyuatstjvzzbb.supabase.co';
+    var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsbGl3bWdkeXVhdHN0anZ6emJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4MDI4MTAsImV4cCI6MjA4ODM3ODgxMH0.6qmXdDdToqZvqvaOXm8d-0r5rK6a-QCad2o1IRZe0KM';
+    var TABLE = 'blog_comments';
+
+    function getSlug() {
+      return window.location.pathname.replace(/\/+$/, '').split('/').pop() || '';
     }
 
-    function load() {
-      const host = document.querySelector('.giscus');
-      if (!host || host.dataset.loaded === '1') return;
-      host.dataset.loaded = '1';
-
-      const s = document.createElement('script');
-      s.src = 'https://giscus.app/client.js';
-      s.async = true;
-      s.crossOrigin = 'anonymous';
-      s.setAttribute('data-repo', 'my-monkeys/blog');
-      s.setAttribute('data-repo-id', 'R_kgDOSlMjIA');
-      s.setAttribute('data-category', 'General');
-      s.setAttribute('data-category-id', 'DIC_kwDOSlMjIM4C9pHM');
-      s.setAttribute('data-mapping', 'pathname');
-      s.setAttribute('data-strict', '0');
-      s.setAttribute('data-reactions-enabled', '1');
-      s.setAttribute('data-emit-metadata', '0');
-      s.setAttribute('data-input-position', 'top');
-      s.setAttribute('data-theme', pickTheme());
-      s.setAttribute('data-lang', 'fr');
-      s.setAttribute('data-loading', 'lazy');
-      host.appendChild(s);
+    function escapeHTML(s) {
+      var d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
     }
 
-    function postThemeMessage(theme) {
-      const iframe = document.querySelector('iframe.giscus-frame');
-      if (!iframe) return;
-      iframe.contentWindow.postMessage(
-        { giscus: { setConfig: { theme } } },
-        'https://giscus.app',
-      );
+    function timeAgo(dateStr) {
+      var diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
+      if (diff < 60) return "à l'instant";
+      if (diff < 3600) return Math.floor(diff / 60) + ' min';
+      if (diff < 86400) return Math.floor(diff / 3600) + ' h';
+      if (diff < 2592000) return Math.floor(diff / 86400) + ' j';
+      return new Date(dateStr).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
     }
 
-    // Observe theme toggle and update iframe live.
-    const obs = new MutationObserver(() => {
-      postThemeMessage(pickTheme());
-    });
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    function renderComments(comments, listEl) {
+      if (!comments.length) {
+        listEl.innerHTML = '<p class="comment-empty">Aucun commentaire. Sois le premier.</p>';
+        return;
+      }
+      listEl.innerHTML = comments.map(function (c) {
+        return '<div class="comment">' +
+          '<div class="comment-header">' +
+            '<span class="comment-author">' + escapeHTML(c.author_name) + '</span>' +
+            '<span class="comment-date">' + timeAgo(c.created_at) + '</span>' +
+          '</div>' +
+          '<p class="comment-body">' + escapeHTML(c.message) + '</p>' +
+        '</div>';
+      }).join('');
+    }
 
-    document.addEventListener('astro:page-load', load);
+    function supaFetch(method, params) {
+      var url = SUPABASE_URL + '/rest/v1/' + TABLE;
+      var opts = {
+        method: method,
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_KEY,
+          'Content-Type': 'application/json',
+          'Prefer': method === 'POST' ? 'return=representation' : undefined
+        }
+      };
+      if (method === 'GET') {
+        url += '?post_slug=eq.' + encodeURIComponent(params.slug) + '&order=created_at.asc';
+      } else {
+        opts.body = JSON.stringify(params);
+      }
+      return fetch(url, opts).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+        return r.json();
+      });
+    }
+
+    function loadComments() {
+      var listEl = document.querySelector('[data-comment-list]');
+      if (!listEl) return;
+      supaFetch('GET', { slug: getSlug() })
+        .then(function (data) { renderComments(data, listEl); })
+        .catch(function () { listEl.innerHTML = '<p class="comment-empty">Impossible de charger les commentaires.</p>'; });
+    }
+
+    function attachForm() {
+      var form = document.querySelector('[data-comment-form]');
+      if (!form || form.dataset.attached === '1') return;
+      form.dataset.attached = '1';
+
+      var saved = localStorage.getItem('blog_comment_name');
+      if (saved) form.querySelector('[name="author_name"]').value = saved;
+
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var errorEl = form.querySelector('[data-comment-error]');
+        var btn = form.querySelector('.comment-submit');
+        var name = form.querySelector('[name="author_name"]').value.trim();
+        var msg = form.querySelector('[name="message"]').value.trim();
+        if (!name || !msg) return;
+
+        btn.disabled = true;
+        btn.textContent = '…';
+        errorEl.textContent = '';
+
+        localStorage.setItem('blog_comment_name', name);
+
+        supaFetch('POST', { post_slug: getSlug(), author_name: name, message: msg })
+          .then(function () {
+            form.querySelector('[name="message"]').value = '';
+            loadComments();
+          })
+          .catch(function (err) {
+            errorEl.textContent = 'Erreur : ' + (err.message || 'réessaie.');
+          })
+          .finally(function () {
+            btn.disabled = false;
+            btn.textContent = 'Envoyer';
+          });
+      });
+    }
+
+    function init() {
+      loadComments();
+      attachForm();
+    }
+
+    document.addEventListener('astro:page-load', init);
   })();
 </script>
 
@@ -79,17 +167,108 @@
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--ink-soft);
-    margin-bottom: 0.75rem;
+    margin-bottom: 1.25rem;
   }
-  .comments-intro {
+
+  .comment-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 2rem;
+  }
+  .comment-input,
+  .comment-textarea {
+    font-family: var(--font-ui);
+    font-size: 0.9375rem;
+    padding: 0.6rem 0.75rem;
+    border: 2px solid var(--ink);
+    background: var(--bg);
+    color: var(--ink);
+    width: 100%;
+    resize: vertical;
+  }
+  .comment-input::placeholder,
+  .comment-textarea::placeholder {
+    color: var(--ink-soft);
+    opacity: 0.6;
+  }
+  .comment-input:focus,
+  .comment-textarea:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .comment-form-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+  }
+  .comment-error {
+    font-family: var(--font-ui);
+    font-size: 0.8125rem;
+    color: var(--alert);
+  }
+  .comment-submit {
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 0.8125rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.5rem 1.25rem;
+    border: 2px solid var(--ink);
+    background: var(--ink);
+    color: var(--bg);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .comment-submit:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+  }
+  .comment-submit:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .comment-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .comment-loading,
+  .comment-empty {
     font-family: var(--font-ui);
     font-size: 0.875rem;
     color: var(--ink-soft);
-    margin-bottom: 1.5rem;
   }
-  .comments-intro a {
-    color: var(--accent);
-    text-decoration: underline;
+
+  .comment {
+    padding: 1rem 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--ink) 15%, transparent);
   }
-  .giscus { min-height: 8rem; }
+  .comment:last-child { border-bottom: 0; }
+  .comment-header {
+    display: flex;
+    gap: 0.75rem;
+    align-items: baseline;
+    margin-bottom: 0.35rem;
+  }
+  .comment-author {
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+  .comment-date {
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+  }
+  .comment-body {
+    font-family: var(--font-body);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
 </style>
