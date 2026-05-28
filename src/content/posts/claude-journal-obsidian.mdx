@@ -1,0 +1,365 @@
+---
+title: "J'ai transformé 1700 conversations Claude Code en un vault Obsidian auto-mis-à-jour"
+date: 2026-05-28
+type: article
+excerpt: "Extraire, résumer via IA et indexer toutes mes sessions Claude Code dans un journal Obsidian qui se met à jour tout seul. Avec les détours pénibles : projet GCP suspendu, quota free tier, hook qui bloquait la fermeture, et un audit GitGuardian inattendu."
+tags: ["claude-code", "obsidian", "gemini", "deepseek", "automation", "security", "gitguardian"]
+project: "claude-journal"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+
+J'utilise **Claude Code** tous les jours, sur une trentaine de projets. Au bout de quelques mois, j'avais accumulé **1700 fichiers JSONL** dans `~/.claude/projects/` — soit 813 MB de conversations stockées localement.
+
+Le problème : impossible de retrouver une info dedans. *« Qu'est-ce qu'on avait décidé pour la migration Drizzle sur piloo ? »*, *« Comment j'avais résolu ce bug CORS sur vocast ? »* — c'était écrit quelque part, mais perdu dans des UUIDs anonymes.
+
+J'ai voulu transformer ce magma en **journal navigable**. Voilà comment, avec les vrais détours pénibles.
+
+## L'idée
+
+Un **vault Obsidian** où chaque session Claude Code devient une note structurée, organisée par projet, avec :
+
+- Un résumé en 2-3 phrases généré par IA
+- Les **demandes notables** (les pivots de la conversation, pas le verbatim)
+- Des **notes catégorisées** : décisions techniques, patterns, erreurs résolues, apprentissages
+- Le tout relié par des `[[wikilinks]]` pour que le graph view soit utilisable
+
+L'inspiration directe : [cc-obsidian-mem](https://github.com/Z-M-Huang/cc-obsidian-mem), un plugin (archivé) qui capture les sessions Claude Code en temps réel via SQLite. J'ai pris la **structure de catégorisation** (decisions / patterns / errors / learnings) et leur **prompt d'extraction**, mais j'ai jeté le reste : eux capturent en live, moi je voulais surtout un **backfill rétroactif** sur des sessions déjà terminées.
+
+## Phase 1 : parser les JSONL
+
+Les conversations Claude Code sont des fichiers JSONL avec une ligne par event :
+
+```jsonl
+{"type": "user", "message": {"content": "tu peux..."}, "timestamp": "..."}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", ...}]}}
+{"type": "ai-title", "aiTitle": "Add multiple file upload option"}
+```
+
+Un script Python parcourt `~/.claude/projects/`, extrait par session : titre, timestamp, branche git, messages utilisateur, appels d'outils, commandes bash, fichiers modifiés.
+
+Le mapping nom-de-dossier → nom-de-projet a demandé un peu de gymnastique. Claude Code encode les chemins en remplaçant `/` par `-` :
+
+```
+-Users-maxim-Documents-my-monkey-showroom
+        ↓
+~/Documents/my-monkey/showroom
+```
+
+Mais `my-monkey-showroom` peut être une seule dir ou trois (`my`, `monkey`, `showroom`). La solution : tester chaque combinaison contre le filesystem réel pour reconstruire l'arborescence. Idem pour `scalab-games-94-Secondes` qui s'avère être `scalab_games/94-Secondes` (underscore vs tiret, encodage ambigu).
+
+Résultat de phase 1 : une structure :
+
+```
+~/Obsidian/claude-journal/
+    Claude Code Journal.md            ← index racine
+    my-monkey/
+        my-monkey.md                  ← index projet
+        sessions/                     ← 35 fichiers
+        showroom/
+            showroom.md
+            sessions/                 ← 8 fichiers
+        piloo/  ...
+    vocast-web-app/
+    scalab_games/
+        94-Secondes/
+        AdJust/
+```
+
+Le graph Obsidian montre déjà la hiérarchie : un node par projet, lié à ses sous-projets et à ses sessions.
+
+## Phase 2 : résumer via IA
+
+Le markdown brut, c'est juste un dump : tous les messages utilisateur empilés verbatim, tous les outils utilisés, tous les fichiers touchés. Illisible pour ressortir une vraie connaissance.
+
+J'envoie chaque session à un LLM avec un prompt qui demande un JSON structuré :
+
+```python
+EXTRACTION_PROMPT = """
+Tu reçois la transcription complète d'une session Claude Code.
+Produis un JSON :
+- summary : 2-3 phrases qui résument l'objectif et le résultat
+- notable_requests : 3-8 demandes-clés (pivots), pas la liste verbatim
+- decisions, patterns, errors, learnings : tableaux d'éléments
+  {title (2-5 mots), content (2-5 phrases focus POURQUOI), tags}
+"""
+```
+
+Premier choix : **Gemini 2.5 Flash**. Rapide, pas cher, bon pour de l'extraction structurée. Sur les 184 sessions, ça aurait coûté environ 50 centimes.
+
+Sauf que.
+
+### Détour pénible n°1 : un projet GCP suspendu
+
+J'avais une clé Gemini créée il y a un an pour des tests. Mauvaise idée : elle s'est retrouvée commit dans un repo public à un moment, scrapée par un bot, et utilisée pour générer ~785 000 images en une seule journée (~50 € de facture sur Gemini Image).
+
+Google a détecté l'abus automatiquement et a **suspendu tout le projet GCP** (`Heartstring`), pas juste la clé. Toutes les clés du projet sont devenues `Indisponible`.
+
+Heureusement leur message était transparent : *« Il semble que votre organisation a publié par inadvertance les clés API, et qu'un tiers les a récupérées »*. J'ai ouvert un ticket d'appel pour le remboursement (réponse Google ~2-5 jours).
+
+<Callout type="info">
+**Leçon** : créer un nouveau projet GCP isolé (`my-monkey-analytics`), avec une nouvelle clé **restreinte à l'API Generative Language uniquement**. Si elle fuite, le pirate ne peut pas faire de génération d'image avec.
+</Callout>
+
+```bash
+gcloud alpha services api-keys create \
+  --project=my-monkey-analytics \
+  --display-name="claude-journal-summarize" \
+  --api-target=service=generativelanguage.googleapis.com
+```
+
+Et un **budget GCP plafonné à 10 €/mois** avec alertes email à 50% / 90% / 100%.
+
+### Bonus : audit GitGuardian + ggshield
+
+Après cette mésaventure, j'ai voulu savoir **combien d'autres clés** avaient fui dans mes repos historiques. J'avais déjà un compte [GitGuardian](https://www.gitguardian.com/) qui scanne automatiquement les repos GitHub, mais je n'avais jamais regardé sérieusement.
+
+Verdict via leur API : **338 incidents détectés, dont 330 non résolus.** Pour les criticaux : 6 Google API Keys, 5 Google Cloud Keys, 3 Google OAuth, plus du Stripe, du Spotify. (Beaucoup de RSA private keys remontent aussi, mais c'est souvent des faux positifs de fixtures dans `node_modules` — à filtrer.)
+
+**La nuance importante** : en croisant avec GitHub, 30 repos sur 31 sont **privés**. Donc dans l'absolu, pas de drame immédiat — sauf la clé Gemini de tout à l'heure qui, elle, s'est retrouvée publique. Mais un repo privé n'est qu'à une erreur de devenir public : passage en open-source mal préparé, fork accidentel, screen-share lors d'un call, push vers un mauvais remote. Mieux vaut révoquer / redact dès maintenant que de découvrir le problème en post-mortem.
+
+```bash
+# CLI officiel
+brew install ggshield
+ggshield auth login
+
+# Hook pre-commit global : bloque tout commit contenant une clé détectable
+ggshield install -m global
+git config --global core.hooksPath \
+  "$HOME/Library/Application Support/ggshield/git-hooks/"
+```
+
+Depuis, n'importe quel `git commit` dans n'importe quel repo passe par ggshield. Si une clé est détectée dans le diff, le commit est refusé avant même d'atteindre le local.
+
+<Callout type="warning">
+**Attention si tu utilises Husky** : Husky définit `core.hooksPath = .husky` au niveau du repo, ce qui **override** le hooksPath global de ggshield. Tes projets Node avec Husky n'auront PAS le scan automatique tant que tu ne l'ajoutes pas explicitement dans `.husky/pre-commit`.
+</Callout>
+
+```bash
+# .husky/pre-commit
+ggshield secret scan pre-commit "$@"
+pnpm exec lint-staged   # ou ton hook habituel
+```
+
+C'est exactement ce qui m'est arrivé sur `piloo` — Husky en place depuis des mois, mais ggshield invisible parce que court-circuité. Je l'ai corrigé après avoir écrit ce post.
+
+**Et l'ironie ultime** : le tout premier commit du vault claude-journal a été **bloqué par ggshield**. Mon journal contenait des clés API que j'avais partagées dans de vieilles conversations Claude Code — clés que la session avait fidèlement capturées en verbatim.
+
+J'ai écrit un petit script `redact_secrets.py` qui parcourt le vault et remplace les patterns reconnus par des placeholders :
+
+```python
+PATTERNS = [
+    (r'AIza[A-Za-z0-9_-]{35}',           '[REDACTED_GOOGLE_API_KEY]'),
+    (r'sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{80,}', '[REDACTED_ANTHROPIC_KEY]'),
+    (r'sk-proj-[A-Za-z0-9_-]{80,}',      '[REDACTED_OPENAI_KEY]'),
+    (r'sk-[a-f0-9]{32,}',                '[REDACTED_DEEPSEEK_KEY]'),
+    (r'gh[oprsu]_[A-Za-z0-9]{36,}',      '[REDACTED_GITHUB_TOKEN]'),
+    (r'AKIA[0-9A-Z]{16}',                '[REDACTED_AWS_ACCESS_KEY]'),
+    (r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}',
+                                         '[REDACTED_JWT]'),
+    # + Slack, Stripe, SendinBlue, Postgres URIs, Bearer tokens...
+]
+```
+
+Désormais : `python redact_secrets.py && git commit` — pipeline propre.
+
+**Leçon générale** : un journal qui capture verbatim tout ce qu'on partage avec une IA devient lui-même une surface d'attaque. Si tu reproduis ce setup, mets ggshield AVANT de versionner le vault.
+
+### Détour pénible n°2 : free tier daily quota = 20 req/jour
+
+Premier lancement du summarize sur les 184 sessions. Après ~30 sessions, j'épuise le quota. Le message : *« GenerateRequestsPerDayPerProjectPerModel-FreeTier, limit: 20 »*.
+
+Sur un projet GCP **sans facturation activée**, Gemini 2.5 Flash est limité à 20 requêtes par jour. C'est cohérent pour un sandbox, mais inutilisable pour mon batch.
+
+J'active la facturation → quota qui devrait passer à 1500/jour. **Nouveau message** : *« Your prepayment credits are depleted »*. Apparemment Gemini exige des crédits prépayés, pas juste un compte de facturation lié. Je dépose 10 € en prépayé, et le summarize passe enfin.
+
+### DeepSeek pour la finition
+
+Une fois Gemini Flash terminé (avec quelques sessions mal résumées par manque de contexte), je suis passé à **DeepSeek V4 Pro**. Contexte 128K (vs 8-32K Flash), résumés beaucoup plus nuancés, et — surtout — j'avais des crédits DeepSeek dormants.
+
+L'API DeepSeek est compatible OpenAI :
+
+```python
+from openai import OpenAI
+client = OpenAI(api_key=KEY, base_url="https://api.deepseek.com/v1")
+response = client.chat.completions.create(
+    model="deepseek-v4-pro",
+    messages=[
+        {"role": "system", "content": EXTRACTION_PROMPT},
+        {"role": "user", "content": transcript},
+    ],
+    response_format={"type": "json_object"},
+)
+```
+
+J'ai ré-summarizé les 184 sessions avec Pro, transcripts non tronqués (jusqu'à 250 KB envoyés au modèle). Le résultat est qualitativement plus dense : les *demandes notables* capturent les vrais pivots de la conversation au lieu de répéter mécaniquement les messages.
+
+## Phase 3 : le hook auto
+
+Le backfill historique c'est bien, mais je voulais que **chaque nouvelle session** s'ajoute toute seule au vault. Claude Code expose des hooks dans `~/.claude/settings.json` :
+
+```json
+{
+  "hooks": {
+    "SessionEnd": [{
+      "hooks": [{
+        "type": "command",
+        "command": "/path/to/hook_session_end.py",
+        "timeout": 60
+      }]
+    }]
+  }
+}
+```
+
+À chaque fin de session, Claude Code pipe un JSON `{"session_id": "..."}` sur stdin du script. Le hook localise le JSONL, le parse, appelle DeepSeek, génère les notes catégorisées, met à jour l'index du projet et de la racine.
+
+### Détour pénible n°3 : Claude Code attend que le hook finisse
+
+Premier test du hook : ça marche, mais **Claude Code met 30 secondes à se fermer**. Le hook bloque l'appel `SessionEnd` jusqu'à la fin de l'appel LLM.
+
+Solution : un **wrapper bash qui spawne le hook détaché** du process parent.
+
+```bash
+#!/bin/bash
+TMP=$(mktemp)
+cat > "$TMP"   # buffer le JSON stdin
+
+(
+  python hook_session_end.py < "$TMP" >> log 2>> err
+  rm -f "$TMP"
+) </dev/null >/dev/null 2>&1 &
+disown 2>/dev/null
+
+exit 0
+```
+
+Le `( ) &` + `disown` + redirections de stdio coupent les liens avec le parent. Claude Code voit le hook se terminer en 10 ms, ferme la session, et le Python continue à tourner en background.
+
+Bonus : une notification macOS quand le hook a fini de processer la session :
+
+```python
+import subprocess
+subprocess.run([
+    "osascript", "-e",
+    f'display notification "{body}" with title "Claude Journal" sound name "Glass"'
+])
+```
+
+### Détour pénible n°4 : sessions qui grossissent
+
+Si je rouvre une session Claude Code (continue d'une vieille conversation), le JSONL s'agrandit, mais le hook avait déjà marqué la session `status: "summarized"`. Avec la logique initiale, il skippait.
+
+Fix : le hook **re-summarize toujours** sur SessionEnd. Avant de re-générer les notes catégorisées, il supprime celles qui ont `source_session: "<this fname>"` dans leur frontmatter — évite les doublons.
+
+## Le résultat
+
+```
+32 projets organisés en hiérarchie
+185 sessions résumées
+2 257 notes catégorisées (decisions / patterns / errors / learnings)
+1 hook auto sur SessionEnd
+1 budget GCP à 10 €/mois
+```
+
+Une note de session typique ressemble à ça :
+
+```markdown
+---
+type: session
+title: "Add multiple file upload option"
+date: 2026-05-02
+project: my-monkey/showroom
+tags: [feature, deploy, code]
+---
+
+# Add multiple file upload option
+
+## Résumé
+Ajout de l'upload multiple de fichiers partageant un même
+lien de partage. Implémentation d'une colonne bundle_uid,
+d'un endpoint /api/upload-batch, et d'une page /b/[uid]
+listant les fichiers du lot.
+
+## Demandes notables
+- Ajouter l'upload multiple avec un lien partagé unique
+- Utiliser le MCP Supabase pour appliquer la migration
+- Déployer en production après validation
+
+## Notes extraites
+- Décision : [[Pas-de-table-séparée-pour-les-bundles]]
+- Pattern : [[Génération-d-ID-unique-centralisée]]
+- Erreur : [[Déploiement-refusé-working-tree-sale]]
+```
+
+Dans Obsidian, le graph view montre les clusters par projet, les liens parent↔enfant, et les notes de connaissance attachées à plusieurs sessions (les patterns récurrents émergent visuellement).
+
+## Comment reproduire chez toi
+
+### Prérequis
+
+- macOS (le hook utilise `osascript`, à adapter Linux)
+- Python 3.10+
+- Une clé Gemini (gratuit) ou DeepSeek (~10 € en crédits prépayés couvre des milliers de sessions)
+- Obsidian
+
+### Étapes
+
+1. **Cloner le projet** (source à venir, je publie ça bientôt) ou récupérer juste les 3 fichiers : `extract.py`, `hook_session_end.py`, `hook_session_end_async.sh`.
+
+2. **Installer les dépendances** dans un venv :
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/pip install google-genai openai json-repair
+   ```
+
+3. **Configurer les clés** dans `secrets/.env.gemini` ou `.env.deepseek` (ces fichiers en chmod 600, gitignored).
+
+4. **Backfill initial** :
+   ```bash
+   .venv/bin/python extract.py
+   .venv/bin/python extract.py --summarize --llm deepseek
+   ```
+
+5. **Activer le hook** dans `~/.claude/settings.json` :
+   ```json
+   {
+     "hooks": {
+       "SessionEnd": [{
+         "hooks": [{
+           "type": "command",
+           "command": "/path/to/hook_session_end_async.sh",
+           "timeout": 5
+         }]
+       }]
+     }
+   }
+   ```
+
+6. **Ouvrir le vault** dans Obsidian. Activer le plugin Dataview pour rendre les tableaux dynamiques de l'index racine.
+
+7. **Lancer une session Claude Code, la fermer.** Une notification macOS pop dans les 30 secondes : *« Claude Journal mis à jour — projet/X — N notes, K demandes notables »*.
+
+### Coût réel
+
+Mesuré sur mon dashboard à la fin de la journée :
+
+- **Gemini 2.5 Flash** : ~50 centimes pour 200 sessions (free tier après quelques jours suffit largement)
+- **DeepSeek V4 Pro** : **$1.14** pour résumer ~190 sessions avec contexte large (transcripts jusqu'à 250 KB)
+- **DeepSeek V4 Flash** (pour les tests) : $0.01
+- **Stockage local** : ~50 MB pour le vault (vs 813 MB des JSONL bruts)
+
+Soit moins d'**1,10 €** pour transformer 200 conversations en un journal navigable avec 2 200+ notes structurées. Le coût marginal d'une nouvelle session traitée par le hook tourne autour de **0,5-1 centime**.
+
+## Ce que ça change
+
+J'ai gagné trois choses concrètes :
+
+1. **Retrouver une décision en 30 secondes** via Obsidian search au lieu de scroller dans des conversations.
+2. **Voir les patterns récurrents** : quand je redécouvre la même erreur sur deux projets différents, les notes `errors/` créent un lien naturel.
+3. **Un mémoire long-terme** : si je reviens sur `piloo` dans six mois après avoir tout oublié, l'index du projet me donne le contexte (35 sessions, sous-projets, décisions clés) en une page.
+
+Le système vit tout seul maintenant. Chaque fois que je ferme Claude Code, le journal s'enrichit en arrière-plan, ping discret du Mac quand c'est fait.
+
+Si tu veux jouer avec : le code est en train d'être nettoyé pour publication, je mettrai à jour ce post avec le lien quand c'est prêt.
