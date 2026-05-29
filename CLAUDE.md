@@ -464,3 +464,43 @@ Voir `../CLAUDE.md` (clean code, pas d'abstractions prématurées, pas de commen
 - Les composants utilisables depuis MDX (`Callout`, `Mortem`, `ProjectCard`) sont importés explicitement dans le frontmatter du fichier `.mdx` qui les utilise.
 - Pas de CSS framework — tout en CSS natif avec tokens dans `global.css`.
 - Animations GSAP centralisées dans `src/scripts/animations.ts`, déclenchées sur `astro:page-load` pour fonctionner aussi avec View Transitions.
+
+## Vérifier qu'un deploy est bien passé
+
+`gh release create` rend la main **avant** que monkey ait fini (webhook async). Ne jamais conclure « déployé » sur le seul exit code de `gh` : **toujours** confirmer `status: success` via l'API admin monkey.
+
+Deux URLs pour la même API admin (Bearer token `ADMIN_API_TOKEN`), à choisir selon ton accès réseau :
+- **Public (depuis Internet, pour tout le monde)** : `https://git.my-monkey.fr/api/admin/deploys`
+- **Tailscale (sur le tailnet cookie-server)** : `http://monkey.cookie/api/admin/deploys`
+
+Filtre `?repo=<org/repo>&limit=1`, tri par date desc → la ligne `[0]` est le dernier deploy.
+
+```bash
+# Token admin monkey — deux cas :
+#  • Tailscale + accès SSH à cookie-server → récupération auto ci-dessous
+#  • sinon → exporte d'abord  MONKEY_ADMIN_TOKEN=<token admin monkey>
+TOKEN="${MONKEY_ADMIN_TOKEN}"
+[ -z "$TOKEN" ] && TOKEN=$(ssh cookie-server.tailscale "grep '^ADMIN_API_TOKEN=' /home/maxim/monkey/infra/.env.production | cut -d= -f2-")
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)   # ex: my-monkeys/<repo>
+TAG="vX.Y.Z"   # le tag qu'on vient de publier
+
+for i in $(seq 1 40); do
+  row=$(curl -s "https://git.my-monkey.fr/api/admin/deploys?repo=$REPO&limit=1" \
+          -H "Authorization: Bearer $TOKEN")
+  st=$(echo "$row" | jq -r '.deploys[0].status')
+  tg=$(echo "$row" | jq -r '.deploys[0].tag')
+  echo "deploy $tg → $st"
+  case "$st" in
+    success)          echo "✅ upload OK ($tg)"; break ;;
+    failed|cancelled) id=$(echo "$row" | jq -r '.deploys[0]._id')
+                      echo "❌ deploy $st — logs :"
+                      curl -s "https://git.my-monkey.fr/api/admin/deploys/$id/logs" \
+                           -H "Authorization: Bearer $TOKEN" \
+                        | jq -r '.logs[] | "[\(.phase)] \(.msg)"'
+                      exit 1 ;;
+    *)                sleep 5 ;;   # pending/running → on attend
+  esac
+done
+```
+
+À asserter : `deploys[0].tag` == le tag publié **et** `deploys[0].status` == `success`. Si `failed`/`cancelled`, lire les logs via `…/deploys/<id>/logs` (champs `phase` + `msg`) avant de retenter. Champs d'une ligne : `repo`, `tag`, `target`, `status`, `phase`, `startedAt`, `finishedAt`, `releaseUrl`.
