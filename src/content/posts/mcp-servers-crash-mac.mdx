@@ -340,17 +340,22 @@ C'est un [bug connu](https://github.com/vercel/next.js/discussions/77102) — Tu
 
 Le watchdog bash fait le job mais il faut un terminal dédié. J'ai fini par écrire une app macOS native — **Claude Monitor** — qui vit dans la menu bar et surveille en permanence.
 
-C'est une app SwiftUI de ~300 lignes, compilée avec Swift Package Manager, zéro dépendance. Le singe 🐵 dans la menu bar affiche en temps réel le nombre de Claude et MCP servers. Un clic ouvre le dashboard :
+C'est une app SwiftUI de quelques centaines de lignes, compilée avec Swift Package Manager, zéro dépendance. Le singe 🐵 dans la menu bar affiche en temps réel le nombre de Claude et de serveurs MCP. Un clic ouvre le dashboard :
 
 - **RAM** en gros avec barre de progression colorée (vert/orange/rouge)
-- **Compteurs** : Claude instances, MCP servers, PostCSS workers avec la RAM de chaque catégorie
+- **Espace disque** disponible avec barre used/total (le chiffre du Finder)
+- **Compteurs** : instances Claude, serveurs MCP, et le **nombre de process de ton user** rapporté à la limite `kern.maxprocperuid` (~2666 ici) — exactement le plafond que la bombe PostCSS faisait exploser, celui qui déclenche le `forkpty: Resource temporarily unavailable`
 - **Top apps** par consommation mémoire avec mini barres visuelles
-- **Boutons kill** : un clic pour tuer tous les PostCSS workers ou tous les MCP servers
-- **Auto-kill configurable** : sliders pour ajuster le seuil (nombre de workers et GB de RAM)
+- **Bouton kill** : un clic pour tuer tous les serveurs MCP
+- **Auto-kill configurable** : sliders pour le seuil (% de la limite de process + GB de RAM)
 
 ![Claude Monitor menu bar app](./_assets/claude-monitor.png)
 
-L'auto-kill vérifie toutes les 5 secondes. Si les PostCSS dépassent le seuil ou que la RAM explose, il les tue avant que le Mac ne crash. C'est le watchdog bash, mais en app native, toujours visible, toujours actif.
+L'auto-kill vérifie toutes les 5 secondes. Si le nombre de process approche la limite ou que la RAM explose, il reape le swarm de serveurs MCP avant que le Mac ne se fige. C'est le watchdog bash, mais en app native, toujours visible, toujours actif.
+
+<Callout type="info" label="Mise à jour">
+Depuis, l'app a évolué au-delà de ce post-mortem. Plutôt que de compter spécifiquement les workers PostCSS, elle surveille le **nombre total de process** vs la limite système — la cause racine *générique* d'un crash, pas juste ce bug-là. Et les serveurs MCP sont repérés par **filiation** (les process enfants d'une session `claude`) au lieu de matcher des noms : ça attrape même les serveurs au nom exotique, et ignore naturellement les MCP distants (qui n'ont pas de process local).
+</Callout>
 
 Le code est dans [`my-monkeys/claude-monitor`](https://github.com/my-monkeys/claude-monitor) — un `swift build -c release` et c'est installé.
 
