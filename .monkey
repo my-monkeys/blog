@@ -10,5 +10,6 @@
     "description": "Blog My-Monkey — carnet de bord d'une galaxie d'une trentaine de projets perso : updates, post-mortems et défis techniques en continu.",
     "image": "/og-default.png",
     "category": "blog"
-  }
+  },
+  "posts": { "manifest": "dist/posts.json" }
 }
