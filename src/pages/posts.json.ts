@@ -11,6 +11,7 @@ export async function GET(_context: APIContext) {
     type: p.data.type,
     tags: p.data.tags,
     date: p.data.date.toISOString(),
+    image: p.data.type === 'link' ? undefined : `https://blog.my-monkey.fr/og/${p.slug}.png`,
   }));
   return new Response(JSON.stringify(items), { headers: { 'Content-Type': 'application/json' } });
 }
