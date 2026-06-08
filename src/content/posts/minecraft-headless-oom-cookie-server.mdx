@@ -1,0 +1,155 @@
+---
+title: "OOM-killé en boucle : un client Minecraft headless sur le serveur sous mon bureau"
+date: 2026-06-05
+type: post-mortem
+excerpt: "Pour dumper les assets d'un modpack, il fallait lancer un client Minecraft moddé sans écran sur cookie-server. Entre l'iGPU AMD, Xwayland et un OOM-killer qui visait le mauvais process, ça a pris plusieurs relances."
+tags: ["debug", "minecraft", "infra", "oom", "tailscale", "headless"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Mortem from '@/components/Mortem.astro';
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+
+<Mortem
+  symptom="Le client Minecraft moddé, lancé headless sur cookie-server pour dumper les icônes, se fait tuer pendant le chargement du monde. Pire : parfois c'est le serveur Minecraft des potes qui tombe à sa place. Le dump /fcdump ne va jamais au bout."
+  cause="cookie-server n'a que ~4 Go libres (un 2e serveur de jeu Java + Convex mangent la RAM). Le client OOM-kill au world-load, et l'OOM-killer choisit parfois le serveur MC (-Xmx16 Go) comme victime au lieu du client jetable."
+  fix="Faire du client l'unique victime de l'OOM (oom_score_adj=900), le lancer à -Xmx4096M, et libérer ~9 Go avant le dump (tuer le client desktop / hors heures de pointe)."
+/>
+
+Pour construire [modpacks-wiki](https://modpacks.my-monkey.fr), il me fallait dumper les assets du modpack — et la seule source fiable du rendu d'un item, c'est le jeu lui-même. Donc : faire tourner un **client Minecraft moddé**, complet, sans écran, sur cookie-server (mon serveur perso sous le bureau, un Ubuntu 24.04). Le mod de dump, je l'avais écrit ([c'est une autre histoire](/posts/jei-dumper-faire-rendre-minecraft/)). Restait à le lancer. C'est là que ça s'est compliqué — pas côté mod, côté machine.
+
+---
+
+## Le décor : un serveur déjà bien chargé
+
+cookie-server n'est pas dédié à ça. Au moment où je voulais dumper, il faisait déjà tourner, entre autres :
+
+- un **serveur Minecraft pour les potes** via Pterodactyl (`-Xmx16384M nogui`) — c'est-à-dire un truc auquel des gens sont connectés en ce moment même ;
+- **Convex** (~2,9 Go) pour un autre projet ;
+- parfois un **deuxième serveur de jeu Java** (~4,8 Go).
+
+Bilan : il me restait, à la louche, **~4 Go de RAM libre**. Et un client Minecraft moddé qui charge un monde, ça en réclame nettement plus que ça. Le décor était posé pour un drame, je ne le savais juste pas encore.
+
+## Le symptôme : il meurt au chargement du monde
+
+Premier lancement headless. Le JVM démarre, les mods se chargent, le monde commence à se générer… et le process disparaît. Pas de stack trace, pas de crash report propre : juste un `Killed` sec dans le terminal. Le classique du OOM-killer du noyau.
+
+Dans `dmesg`, la confirmation — `Out of memory: Killed process … java`. Sous la pression mémoire, j'avais aussi des erreurs MESA côté driver AMD, des allocations de buffer qui échouaient :
+
+```
+amdgpu: Failed to allocate a buffer
+```
+
+Le world-load est le pic de conso (génération de chunks + textures + entités), et c'est exactement là que ça cassait. Soit. J'augmente la marge, je relance.
+
+## Le coup de théâtre : ce n'est pas toujours le client qui meurt
+
+Et là, le truc qui m'a fait froid dans le dos. Sur une des relances, ce n'est pas mon client jetable qui s'est fait tuer.
+
+**C'est le serveur Minecraft des potes.**
+
+L'OOM-killer du noyau ne sait pas que mon client est jetable et que le serveur, lui, est « la prod ». Il fait un calcul d'`oom_score` basé surtout sur la mémoire occupée par chaque process — et le serveur à `-Xmx16384M` est, mécaniquement, un très gros candidat. Donc le kernel, face à mon client qui sature la RAM, a parfois décidé que la meilleure façon de récupérer de la mémoire… c'était de descendre le serveur. Couper le jeu de tout le monde pour faire de la place à mon dump d'icônes. Merci bien.
+
+<Callout type="warn">
+Quand le système est sous pression mémoire, c'est le **kernel** qui choisit qui meurt, pas toi. Et il choisit « au feeling » (le plus gros consommateur, grosso modo). Si tu as un workload important et un workload jetable sur la même boîte, il n'y a aucune garantie que ce soit le jetable qui parte.
+
+</Callout>
+
+## Le coupable : un OOM-killer qui parie sur la taille
+
+Le vrai problème n'était pas « pas assez de RAM » (ça, c'est la condition). Le problème, c'était **qui** le noyau choisissait de tuer. Sans intervention, la sélection de victime ressemblait à ça :
+
+<Mermaid
+  caption="Sélection de la victime OOM — avant, le noyau vise le plus gros"
+  code={`
+flowchart TD
+  P["Pression memoire (world-load du client)"] --> K["OOM-killer du noyau"]
+  K -->|"score base sur la taille"| S["Serveur MC potes (-Xmx16 Go)"]
+  K -->|"parfois"| C["Client headless (jetable)"]
+  S --> BAD["Le jeu des potes tombe (tres mauvais)"]
+  C --> OK["Dump perdu (acceptable, on relance)"]
+`}
+/>
+
+Tant que le kernel pouvait viser le serveur de 16 Go, je jouais à la roulette russe à chaque lancement. La fix n'est donc pas (seulement) « ajoute de la RAM » — c'est **enlever le choix au noyau**.
+
+## Le fix : forcer la victime, et lui mettre un plafond
+
+Linux expose exactement le levier qu'il faut : `oom_score_adj`, un biais par process entre -1000 (intouchable) et +1000 (« tue-moi en premier »). Je mets le **client** tout en haut de la liste des sacrifiés, et je laisse le serveur à sa valeur par défaut (basse). Comme ça, sous pression, c'est **toujours** le client qui part, jamais le serveur.
+
+```bash
+# une fois le client lancé, on biaise SON pid (jamais celui du serveur)
+echo 900 > /proc/<pid-du-client>/oom_score_adj
+```
+
+Et tant qu'à faire, je mets un **plafond mémoire** au client pour qu'il soit plus poli : `-Xmx4096M` au lieu de le laisser réclamer tout ce qu'il veut. Un client de dump n'a pas besoin de 8 Go de heap pour rendre des icônes.
+
+<Callout type="fix" label="Leçon">
+Quand tu colocalises un workload « prod » (le serveur des potes) et un job batch jetable sur la même machine, **biaise explicitement l'OOM-killer** (`oom_score_adj`) — ne laisse jamais le noyau deviner lequel tuer. Le jetable doit avoir un score haut (+900), la prod reste à sa valeur basse par défaut.
+
+</Callout>
+
+La sélection devient alors déterministe :
+
+<Mermaid
+  caption="Apres oom_score_adj=900 sur le client"
+  code={`
+flowchart TD
+  P["Pression memoire"] --> K["OOM-killer du noyau"]
+  K -->|"oom_score_adj=900 force la victime"| C["Client headless"]
+  C --> OK["Dump perdu au pire, on relance"]
+  S["Serveur MC potes (score bas)"] -.->|"jamais vise"| K
+  S --> SAFE["Le jeu des potes reste debout"]
+`}
+/>
+
+Restait à dégager assez de RAM pour que le client aille au bout. Une atténuation simple : couper les trois VM Multipass `medtech-*` (un TP Kubernetes) libère ~4,5 Go d'un coup. Petit piège au passage — `multipass stop` doit tourner **en tant qu'utilisateur**, pas en `root` (root n'est pas authentifié auprès du daemon Multipass, et la commande échoue silencieusement si tu l'oublies).
+
+## Le moment décisif : `/fcdump` veut 9 Go, j'en ai 4
+
+Le dump des fluides et produits chimiques (`/fcdump`) est le plus gourmand : il charge un monde complet, et il lui faut **~9 Go libres** pour ne pas se faire OOM-killer en plein milieu. J'en avais ~4. Tuer les VM Multipass ne suffisait pas ce jour-là.
+
+La RAM manquante, je savais exactement où elle était : un **client Minecraft desktop** que j'avais laissé ouvert sur la machine (le pid `-Xmx6144M bootstraplauncher --accessToken …`). Pas le serveur — surtout pas le serveur. Le client desktop. Je l'ai tué, ça a libéré ~8 Go, et `/fcdump` est enfin allé au bout.
+
+<Callout type="info">
+La règle d'or sur cette boîte : on peut tuer un **client** MC (il ne se ferme pas tout seul après un dump, de toute façon), **jamais** le serveur (`-Xmx…G nogui`, géré par Pterodactyl). Le pid du serveur a un `nogui` bien visible dans sa ligne de commande — c'est le marqueur à vérifier deux fois avant tout `kill`.
+
+</Callout>
+
+## Le twist Tailscale : la voie d'accès meurt avec la RAM
+
+Le détail le plus vicieux, je l'ai découvert pile au mauvais moment. Sous forte pression mémoire, **`cookie-server.tailscale` (l'IP du tailnet, 100.95.254.17) devient injoignable** — le démon Tailscale rame ou se fait étrangler comme tout le reste. Mais `cookie-server.local` (le LAN) répond encore.
+
+Autrement dit : exactement quand tu as besoin de te connecter en SSH pour aller tuer le process qui s'emballe, le chemin distant que tu utilises d'habitude est justement celui qui lâche. J'ai eu ce moment de solitude — un dump en train de saturer la boîte, et mon SSH Tailscale qui ne répond plus. Heureusement j'étais sur le même réseau, et le `.local` m'a sauvé.
+
+<Callout type="fix" label="Leçon">
+Garde toujours un chemin réseau qui **survit à la pénurie de ressources que tu provoques toi-même**. Si tu pousses délibérément une machine vers l'OOM, ta voie d'accès de secours ne doit pas dépendre d'un service (ici Tailscale) qui s'écroule sous la même pression. Un fallback LAN direct, c'est ce qui m'a permis d'aller couper le runaway.
+
+</Callout>
+
+## Aparté : pas de clavier, donc pas d'input tapé
+
+Tant qu'on parle de headless : déclencher une action *dans* le jeu sans écran ni clavier est un problème en soi. Mon premier réflexe — simuler des frappes via `xdotool`/XTEST — est **mort sur GNOME/Wayland** (XTEST ne traverse pas le compositeur Wayland). La solution a été de ne taper aucun input du tout : les dumps se déclenchent par un **flag JVM** (`-Djeidump.items=true`), par la simple présence d'un **fichier-trigger** (`itemdump.trigger` dans le `gameDir`), ou par un petit script KubeJS sur `ClientEvents.tick`. Zéro touche pressée.
+
+## La recette de lancement (et ses chausse-trappes)
+
+Pour la postérité, parce que chaque ligne ci-dessous m'a coûté un essai raté. Le client se lance en rejouant la ligne `java` que le launcher FTB écrit dans `~/.ftba/logs/debug.log`, avec quelques ajustements :
+
+- **La ligne loggée est entre quotes simples** → il faut virer le `'` final, sinon il casse bash *et* le `--launchTarget`.
+- **Utiliser la JRE bundlée (Java 21)** : `.ftba/bin/runtime/OpenJDK21U-.../bin/java`, **pas** le Java 25 traînant dans `.ftba/runtime` (le mauvais runtime fait planter le chargement).
+- **Construire l'argv en Python** (pas via le shell) et recoller le `--gameDir` qui contient une espace, sinon l'argument se fait découper en deux.
+- **L'environnement X** : `DISPLAY=:0` + `XAUTHORITY=/run/user/1000/.mutter-Xwaylandauth.*` (Xwayland).
+- **Des credentials factices** : `--accessToken 0 --clientId 0 --xuid 0` (on ne se connecte à aucun compte), et `--quickPlaySingleplayer "New World"` pour charger direct un monde.
+- Et bien sûr, `oom_score_adj=900` sur le pid une fois lancé.
+
+Détail amusant : ça rend sur l'**iGPU AMD** (`renderD128`, GL 4.6), pas sur la RTX 3070 — la carte n'est tout simplement pas montée dans cette session headless. J'ai pensé à `Xvfb`, mais ç'aurait été du rendu logiciel pur, beaucoup trop lent pour 30k icônes. L'iGPU fait très bien le job.
+
+## Le résultat
+
+Une fois l'OOM-killer dressé et la RAM libérée au bon moment, tout est passé. Le client headless a tourné jusqu'au bout et craché : **29 655 items**, **345 fluides/chimiques**, et **460 sprite sheets de mobs** en turntable. De quoi alimenter tout le wiki — sans avoir une seule fois descendu le serveur des potes au passage (après le fix `oom_score_adj`, en tout cas).
+
+La morale n'est pas très Minecraft, au fond : si tu fais cohabiter un truc important et un truc jetable sur la même boîte, ne laisse pas le hasard — ou le noyau — décider lequel survit. Dis-le explicitement. Et garde toujours une porte de sortie qui ne s'effondre pas en même temps que la pièce.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · premier pack : StoneBlock 4.*

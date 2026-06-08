@@ -1,0 +1,194 @@
+---
+title: "Du script jetable à l'outil : généraliser un one-off sans le sur-architecturer"
+date: 2026-06-09
+type: article
+excerpt: "J'avais un viewer de quêtes bricolé pour un seul modpack. Le transformer en traducteur générique « n'importe quel modpack → wiki web » a surtout demandé de tracer des frontières — et d'écrire le playbook que je relirai dans 6 mois."
+tags: ["refactoring", "tooling", "architecture", "minecraft", "deploy"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+
+J'avais un viewer de quêtes Minecraft. Un vrai, qui rendait le quest book de StoneBlock 4 au pixel près — formes de nœuds, icônes rendues par le jeu lui-même, lignes de dépendance, la police MC. Il marchait nickel. Et il était hardcodé pour un seul modpack, de A à Z. Cet article, c'est l'histoire de comment je l'ai transformé en outil réutilisable — et surtout, de ce que ça m'a appris sur le moment où on a le droit de généraliser.
+
+---
+
+## Le one-off qui marchait
+
+Le point de départ s'appelait `stoneblock-quests/`. C'était un projet à part entière : un `build.py`, une couche 3D Three.js, un viewer web complet. J'en ai déjà raconté deux morceaux ici — le [rendu pixel-perfect sans WebGL](/posts/modpack-minecraft-pixel-perfect-sans-webgl/) et le [mod qui fait rendre Minecraft pour dumper les icônes](/posts/jei-dumper-faire-rendre-minecraft/). Bref, beaucoup de travail, et un résultat dont j'étais content.
+
+Le problème, c'est que tout dedans disait « StoneBlock 4 ». Les chemins, les constantes de rendu, le nom du pack en dur dans le HTML, la structure de dossiers. Si je voulais faire pareil pour un deuxième modpack, je n'avais pas un outil — j'avais un précédent à copier-coller-modifier. C'est très différent.
+
+Et c'est là que la règle maison de la galaxie My-Monkey est tombée pile : **pas d'abstraction prématurée, on extrait au 3ᵉ usage**. Sauf que là, je n'en étais qu'au deuxième pack envisagé. Verdict ? J'ai généralisé quand même — mais en restant honnête sur jusqu'où.
+
+<Callout type="info" label="La nuance">
+La règle dit « pas d'abstraction prématurée », pas « jamais avant trois fois ». La vraie question n'est pas le compteur, c'est : **est-ce que je vois enfin ce qui varie ?** Au premier pack, je ne le savais pas. Au deuxième, la frontière devient lisible. C'est ça le bon moment, pas le chiffre.
+</Callout>
+
+## La colonne vertébrale : séparer l'outil des données
+
+La généralisation tient en une seule décision, et tout le reste en découle : **séparer le code générique (l'outil) des données par modpack (le pack)**.
+
+Concrètement, le repo `modpacks-wiki/` se découpe en deux mondes qui ne se mélangent jamais :
+
+```
+tool/                 # le traducteur — UNE seule copie, aucun nom de pack dedans
+  profiles/           # profils de rendu extraits du mod FTB, par version MC
+  build_bank.py       # STAGE 1 — récolte les assets depuis un client moddé
+  translate.py        # STAGE 2 — quêtes SNBT + bank + profil → dist/
+  build_crafts.py     # recettes → Supabase
+  build_mobs.py       # loot tables → Supabase
+  build_site.py       # assemble le site unifié
+
+packs/<pack>/         # UN dossier par modpack = de la donnée, pas du code
+  quests/             # snapshot SNBT
+  bank/               # bank d'assets portable (icônes, images, formes, police)
+  dist/               # buildé, gitignored
+```
+
+La règle que je me suis fixée : **aucun nom de pack ne doit apparaître dans `tool/`**. Tout passe par un argument `--pack <slug>` ou par le contenu d'un dossier `packs/<pack>/`. Le jour où cet invariant casse, c'est que j'ai fait fuiter de la donnée dans le code.
+
+Le test le plus parlant de cette discipline, c'est l'**onboarding data-driven** : un nouveau pack qui veut apparaître sur le hub avec une page « À propos » dépose juste deux fichiers — `packs/<pack>/logo.webp` et `packs/<pack>/about.json` (bilingue). Zéro ligne de code à écrire. `build_site.py` les ramasse, génère la carte sur le hub et l'onglet About. Si ajouter un pack m'oblige à toucher `tool/`, c'est raté.
+
+<Mermaid
+  caption="Le générique (tool/, une copie) vs la donnée (packs/<pack>/, un dossier par modpack)"
+  code={`
+flowchart TD
+  subgraph T["tool/ &mdash; générique, partagé"]
+    BB["build_bank.py"]
+    TR["translate.py"]
+    BS["build_site.py"]
+    PR["profiles/neoforge-1.21.json"]
+  end
+  subgraph P["packs/stoneblock4/ &mdash; donnée"]
+    Q["quests/ (SNBT)"]
+    BK["bank/ (assets)"]
+    AB["about.json + logo.webp"]
+  end
+  Q --> TR
+  BK --> TR
+  PR --> TR
+  TR --> D["dist/"]
+  D --> BS
+  AB --> BS
+  BS --> SITE["site/ unifié"]
+`}
+/>
+
+## Une frontière nette : « a besoin du jeu » vs « a besoin de rien »
+
+Le pipeline a deux étages, et la ligne entre les deux n'est pas arbitraire — c'est la frontière la plus utile que j'ai tracée.
+
+**STAGE 1 — `build_bank`** tourne **là où le client moddé est installé** (chez moi : cookie-server). Il a besoin du jeu : il fait rendre chaque icône par le moteur de Minecraft, résout les textures de chapitres, de formes, l'atlas de police, et écrit une `bank/` portable. C'est le seul étage qui touche au jeu — et c'est aussi le plus pénible (lancement d'un client headless, RAM partagée, OOM à gérer ; toute une histoire que [j'ai déjà racontée](/posts/jei-dumper-faire-rendre-minecraft/)).
+
+**STAGE 2 — `translate`** tourne **n'importe où**. C'est du parsing pur : il lit le SNBT des quêtes, résout les références contre la `bank` et le profil de rendu, et crache `dist/{data,profile,manifest}.json`. Pas de jeu, pas de GPU, pas de cookie-server. Juste Python et des fichiers.
+
+```bash
+# STAGE 2, sur n'importe quelle machine :
+.venv/bin/python tool/translate.py \
+  --quests packs/stoneblock4/quests \
+  --bank   packs/stoneblock4/bank \
+  --profile tool/profiles/neoforge-1.21.json \
+  --out    packs/stoneblock4/dist
+```
+
+Cette coupure « a besoin du jeu » vs « a besoin de rien » n'est pas cosmétique : c'est elle qui rend l'outil utilisable. La partie chiante et fragile (STAGE 1) est isolée et ne tourne qu'une fois par pack. Tout le reste — itérer sur le rendu, rebuild le site, débugger — se fait à froid, sur mon Mac, sans jamais réveiller un client Minecraft.
+
+<Callout type="fix" label="Leçon">
+Quand un pipeline a une étape lente, fragile ou qui dépend d'une grosse machine, la **première** frontière à tracer est celle-là : « ce qui a besoin de l'environnement lourd » d'un côté, « ce qui n'a besoin de rien » de l'autre. Tout ce qui peut tourner « partout » doit pouvoir tourner partout. C'est ce qui fait la différence entre un outil qu'on relance avec plaisir et une corvée qu'on évite.
+</Callout>
+
+## Le vrai livrable : le playbook d'onboarding
+
+Voilà le bout que je trouve le plus important, et que j'aurais sous-estimé il y a un an. Ce qui transforme « j'ai refactoré mon script » en « j'ai un outil réutilisable », ce n'est pas le code. C'est **`docs/EXTRACTION.md`** : le mode d'emploi de bout en bout pour onboarder un pack tout neuf.
+
+Tant que je n'arrivais pas à écrire ce doc, l'outil n'était pas réutilisable — il était juste réorganisé. L'exercice d'écrire le playbook *est* le test de réutilisabilité. Il m'a forcé à nommer les 4 sources de données et où chacune tourne :
+
+| Source | Produit | Où ça tourne |
+|---|---|---|
+| **A. Quêtes** | quest book (SNBT → `dist/`) | local |
+| **B. Icônes & GUIs** | bank d'icônes, frames JEI, sheets de mobs | client MC headless |
+| **C. Recettes / Items** | tables `cw_*` | serveur MC (KubeJS) → Supabase |
+| **D. Mobs** | loots & drops | extraction des jars → Supabase |
+
+Et surtout, le doc se termine par une checklist copier-coller « nouveau pack de A à Z ». C'est ça, le livrable. Pas le commit qui renomme les dossiers.
+
+<Callout type="fix" label="Leçon">
+Écris le doc d'onboarding **au fur et à mesure**, pas après. C'est le seul vrai test de « est-ce que c'est réutilisable ? ». Si tu n'arrives pas à écrire les étapes pour le pack suivant sans rouvrir le code et te rappeler des bidouilles, l'outil n'est pas fini — il est juste rangé.
+</Callout>
+
+## Documenter les bords rugueux plutôt que de les sur-automatiser
+
+C'est ici que la règle « pas d'abstraction prématurée » a vraiment payé. J'ai généralisé pour un **deuxième** pack, mais je n'ai construit que les coutures dont j'avais réellement besoin. Le reste — les étapes encore manuelles — je les ai **documentées honnêtement comme telles**, au lieu de les automatiser pour de faux.
+
+Le playbook signale noir sur blanc ce qui est ad-hoc :
+
+- le downscale des icônes d'items 128→64px (`sips` en boucle, candidat à un futur `build_bank --collect-icons`) ;
+- la fusion des layouts JEI en un `_index.json` agrégé (un petit script jetable inline dans le doc) ;
+- l'extraction des loot tables depuis les jars (boucle `unzip -p`, read-only) ;
+- l'extraction des recettes d'élevage Chicken Roost depuis `nonparents/` dans le jar.
+
+Aucune de ces étapes n'a tourné deux fois. Les automatiser maintenant, ce serait deviner l'interface avant d'avoir vu le deuxième cas réel — exactement le piège que la règle maison interdit. Un playbook honnête qui dit « cette étape est manuelle, voici la commande exacte » bat un pipeline « tout automatique » qui ment, ou pire, qui m'enferme dans une mauvaise abstraction.
+
+<Callout type="warn">
+La tentation, en généralisant, c'est de tout scripter d'un coup pour avoir l'air « propre ». C'est une abstraction prématurée déguisée. Tant qu'une étape n'a pas tourné sur deux packs différents, je ne sais pas ce qui est vraiment variable dedans. Je la laisse manuelle, documentée, et je l'automatise le jour où elle me fait mal pour la deuxième fois.
+</Callout>
+
+## L'assemblage et le déploiement : la dédup d'assets
+
+Une fois la donnée prête, `build_site.py` assemble un seul site `site/` = le hub + les vues par pack (Quests / Graphe / Items / Mobs, le tout dans une seule app React dont les onglets dérivent le pack depuis l'URL).
+
+Le piège qui a sauté aux yeux au build : la bank d'icônes (~122 Mo, ~30k PNG) partait **deux fois** — une copie pour les quêtes, une pour les crafts. Soit **~281 Mo / ~60k fichiers**. La correction tient dans la dédup : une seule `site/<pack>/assets/` partagée que les deux vues référencent en `../assets/`. Résultat : **~153 Mo / ~30k fichiers**.
+
+Pour que ça marche, la coordination est explicite et *vérifiée*. L'app crafts doit être buildée avec `VITE_ICON_BASE=../assets/icons`, sinon ses URL d'icônes pointent à côté. `build_site.py` ne fait pas confiance — il **assert** que le bundle a bien été buildé comme ça, et plante sinon :
+
+```python
+js = next((crafts_dist / "assets").glob("index-*.js"), None)
+if js is None or "../assets/icons" not in js.read_text():
+    raise SystemExit(
+        "error: crafts dist isn't built for the unified site — rebuild with "
+        "`VITE_ICON_BASE=../assets/icons npm run build`")
+```
+
+Le viewer de quêtes, lui, porte un `const ASSET_BASE = "assets/"` dans son HTML que `build_site` réécrit en `"../assets/"` au passage. Deux mécanismes différents (assert vs réécriture) pour la même frontière — c'est moche assumé, mais c'est documenté et ça tient.
+
+### Le repo README-only, et pourquoi je ne push pas la source
+
+Petit twist git qui mérite une mention. Je **ne push pas** la source sur GitHub. Le repo `my-monkeys/modpacks-wiki` ne contient que le README (créé avec `--add-readme`).
+
+La raison est bête et concrète : le `.git` fait ~158 Mo, parce que la `bank/` d'icônes 64px est versionnée (c'est elle qui voyage). Pousser ça à chaque release serait absurde. Donc le déploiement ne passe **pas** par git, mais par un **tarball de release** qui ne contient que `.monkey` + `site/` (~79 Mo gzippés, avec un dossier top-level) :
+
+```bash
+.venv/bin/python tool/build_site.py --root . --out site
+# tarball : SEULEMENT .monkey + site/, jamais tout le repo
+tar czf /tmp/app.tgz -C /tmp/modpacks-wiki modpacks-wiki
+gh release create vX.Y.Z --repo my-monkeys/modpacks-wiki /tmp/app.tgz --title "…"
+```
+
+Le `gh release create` déclenche un webhook org-level, et le pipeline **monkey** prend le relais jusqu'à `modpacks.my-monkey.fr`. C'est le même système que [j'ai décrit ici](/posts/monkey-github-releases-vers-o2switch/) — GitHub Release → webhook → O2switch. Comme toujours avec monkey, on ne conclut jamais « déployé » sur l'exit code de `gh` : on attend `status: success` via l'API admin.
+
+<Mermaid
+  caption="Les deux étages, puis l'assemblage et le déploiement par tarball de release"
+  code={`
+flowchart LR
+  A["build_bank (STAGE 1)<br/>a besoin du jeu"] --> B["bank/ portable"]
+  B --> C["translate (STAGE 2)<br/>a besoin de rien"]
+  C --> D["dist/"]
+  D --> E["build_site<br/>dédup assets"]
+  E --> F["site/"]
+  F --> G["tarball .monkey + site/"]
+  G --> H["gh release"]
+  H --> I["webhook → monkey"]
+  I --> J["modpacks.my-monkey.fr"]
+`}
+/>
+
+## Ce que ça donne
+
+Le résultat est live : `modpacks.my-monkey.fr`, premier pack StoneBlock 4, et surtout l'outil prêt pour le pack n°2. La vraie victoire n'est pas la généralisation en soi — c'est que je peux la *décrire*. Si dans six mois je veux ajouter un modpack, je rouvre `docs/EXTRACTION.md`, je suis la checklist, et les étapes encore manuelles sont écrites noir sur blanc avec la commande exacte. Pas de magie cachée, pas de fausse automatisation à débugger.
+
+Généraliser un one-off, au fond, c'est surtout deux choses : tracer les bonnes frontières (générique vs donnée, « besoin du jeu » vs « besoin de rien »), et accepter d'écrire le mode d'emploi honnête plutôt que de prétendre que tout est automatique. Le code suit ; c'est le playbook qui prouve que l'outil existe.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · premier pack : StoneBlock 4.*

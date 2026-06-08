@@ -1,0 +1,164 @@
+---
+title: "Le normaliseur qui jetait silencieusement une recette sur 40"
+date: 2026-06-07
+type: post-mortem
+excerpt: "Ma couche de données de craft était « items only ». Sans le savoir, elle droppait chaque entrée/sortie de fluide ou de produit chimique — 559 recettes avec un ingrédient fantôme, 28 disparues — et des arbres de poules qui mouraient dans le vide."
+tags: ["debug", "data", "minecraft", "etl", "kubejs"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Mortem from '@/components/Mortem.astro';
+import Callout from '@/components/Callout.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+
+<Mortem
+  symptom="Des crafts sans solution là où il en existe une — « Netherite Chicken → aucune recette ». 28 recettes carrément absentes, 559 avec un input manquant. Aucune erreur, juste des arbres qui s'arrêtent net."
+  cause="Le normaliseur de recettes était items-only : la détection d'entrées/sorties excluait tous les fluides, chimiques et gaz. Et le breeding Chicken Roost (type custom chicken_roost:basic_breeding) n'atteignait jamais le dump, tandis que la clé d'input « egg » nue se faisait dropper par le normaliseur générique."
+  fix="Capturer fluides et chimiques sous toutes leurs formes par-mod (chaque I/O porte un kind ∈ {item, fluid, chemical}), reconnaître la clé « egg », ré-injecter le breeding via ingest_breeding.py — le tout sans relancer le jeu, en re-normalisant le dump brut resté sur le disque."
+/>
+
+Le wiki [modpacks-wiki](https://modpacks.my-monkey.fr) a une fonction qui me tient à cœur : tu cliques sur un item, il te déroule l'arbre de craft complet jusqu'aux ressources de base. Sauf que sur StoneBlock 4, certains arbres se cassaient la gueule en silence. Pas d'erreur, pas de log : juste un « aucune recette » là où le jeu, lui, en connaît une parfaitement.
+
+Le coupable, c'est une hypothèse que je n'avais jamais écrite nulle part mais qui était partout : **« une recette, c'est des items ».** Dans un modpack moderne, c'est faux une fois sur quarante.
+
+## Le symptôme
+
+Le pipeline est simple sur le papier. Un script KubeJS dans le jeu dump toutes les recettes en JSON brut, `tool/ftbq/recipes.py` les normalise vers une forme `{id, type, inputs, outputs}`, et `build_crafts.py` pousse le tout vers Supabase. Le résolveur côté front consomme ça et remonte l'arbre.
+
+En testant à la main, je tombe sur le cas le plus bête possible : je clique sur **Netherite Chicken** (oui, dans ce pack tu élèves des poules qui pondent des lingots), et — rien. Aucune recette. Pourtant l'arbre devrait remonter une douzaine de croisements jusqu'aux poules de base.
+
+J'ouvre la table. Et là, deux chiffres qui font mal :
+
+- **559 recettes** avaient un input en moins — un ingrédient qui existait dans le jeu mais avait disparu de mes données.
+- **28 recettes** s'étaient carrément **volatilisées**. Plus aucune trace.
+
+Le truc vicieux : zéro erreur. `build_crafts.py` droppe poliment toute recette sans output résoluble (`a recipe with no resolvable output is useless to a tree`), et ça compte juste un `no_io += 1`. Une recette dont la seule sortie était un fluide se retrouvait sans output → poubelle → silence. Les données mentaient, calmement.
+
+## La cause
+
+Deux bugs distincts qui pointaient le même angle mort.
+
+**1. Le normaliseur était items-only.** La détection des clés d'I/O ne reconnaissait que les formes d'items. Un fluide, un chimique Mekanism, un gaz ? `_result_items` ne sait pas les lire (pas d'`id` d'item dedans), donc ils tombaient dans le vide. Et comme une recette de machine met souvent un fluide en entrée et un item en sortie (ou l'inverse), tu perds soit un ingrédient — d'où les 559 — soit le seul output — d'où les 28 disparues.
+
+Le piège, c'est que personne ne crie. Le normaliseur **droppe** ce qu'il ne reconnaît pas au lieu de le **logger**. S'il avait écrit « 559 I/O inconnus ignorés » au premier run, je l'aurais vu le jour un.
+
+**2. Les poules.** Le mod Chicken Roost a deux soucis cumulés :
+
+- Son croisement (deux poules + graines → une poule de tier supérieur) est une recette de type custom `chicken_roost:basic_breeding`. Or `ServerEvents.recipes` de KubeJS **saute** les types custom qu'il ne connaît pas. Résultat : le breeding n'atteignait **jamais** le dump. L'arbre de la Netherite Chicken n'avait littéralement aucune marche.
+- La chaîne de lancer d'œuf (`chicken_roost:throwegg`) utilise une clé d'input nue : `egg`. Le normaliseur générique cherche `input`/`ingredient` dans le nom de la clé. `egg` ne matche rien, n'apparaît dans aucune autre recette → non reconnu → dropé.
+
+## Le fix
+
+D'abord, **ne pas relancer le jeu.** Le dump brut était encore là, sur le disque, à `/tmp/sb4_recipes_raw.json`. Relancer le client moddé headless, c'est une épreuve à 9 Go de RAM, sujette à l'OOM ([j'en ai déjà parlé ici](/posts/minecraft-headless-oom-cookie-server/)). Hors de question d'en passer par là à chaque itération du normaliseur.
+
+D'où le mode re-normalise-sans-relancer de `build_crafts.py` : il prend le dump brut en argument et reconstruit tout.
+
+```bash
+# re-normalise + re-push, sans rebooter le client moddé
+python build_crafts.py \
+  --raw /tmp/sb4_recipes_raw.json \
+  --out packs/sb4/crafts \
+  --push sb4
+```
+
+Le dump brut sur disque, c'est ce qui a transformé un cycle d'itération de « 20 minutes + risque d'OOM » en « 3 secondes ». J'ai pu tâtonner sur le normaliseur autant que je voulais.
+
+### Capturer les fluides « sous toutes leurs formes »
+
+C'est là que la réalité des données moddées te rattrape : **chaque mod encode ses fluides différemment.** Il n'y a pas une forme canonique, il y en a dix. `recipes.py` a maintenant une passe dédiée fluides/chimiques (`_fluidchem_io`) qui ratisse tout ça.
+
+D'abord la détection. Avant, les clés d'I/O ne voyaient que les items. Maintenant chaque entrée porte un `kind`, et les clés fluides/chimiques sont explicitement exclues du chemin item pour être routées vers la passe dédiée :
+
+<CodeDiff
+  lang="python"
+  beforeLabel="items only"
+  afterLabel="kind-aware"
+  caption="recipes.py — la détection des clés d'I/O (simplifié)"
+  before={`def _is_output_key(k):
+    kl = k.lower()
+    return "output" in kl or "result" in kl
+
+# un fluide/chimique tombe ici, _result_items
+# ne trouve pas d'item → entrée perdue, en silence`}
+  after={`def _is_output_key(k):
+    kl = k.lower()
+    if "output" not in kl and "result" not in kl:
+        return False
+    # fluide/chimique/gaz → exclu, la passe dédiée les ramasse
+    return not any(w in kl for w in
+                   ("fluid", "chemical", "energy", "gas", "heat"))
+
+# + le cas nu : la clé "egg" de chicken_roost:throwegg
+def _is_input_key(k):
+    kl = k.lower()
+    if kl == "egg":           # le seul item input, clé sans "input"
+        return True
+    if "input" not in kl and "ingredient" not in kl:
+        return False
+    return not any(w in kl for w in
+                   ("fluid", "chemical", "energy", "gas", "heat"))`}
+/>
+
+Ensuite, la zoologie des formes que la passe fluide doit avaler. Un échantillon de ce que `_fc_value_items` / `_fc_split_keys` gèrent désormais :
+
+```python
+# chemical_input / chemical_output (Mekanism)
+# fluidInput / fluid_input / fluidInputs
+# inputFluid / input_fluid
+# left_chemical_output / right_chemical_output
+# fluids / fluidIngredients  (listes)
+# fluid_result / outputFluid
+# Create : split en <prefix>Amount (nombre) + <prefix>Variant (id)
+```
+
+Ce dernier cas (Create) est mon préféré : Create ne met pas le fluide en un seul bloc, il l'éclate en `tankAmount` (un nombre) + `tankVariant` (l'id), qu'il faut réapparier par préfixe. C'est ce que fait `_fc_split_keys`. Et Mekanism, à l'inverse, cache parfois un chimique sous une clé **générique** `input` sans aucun marqueur dans le nom — détectable seulement par la **valeur** (`_value_fc_kind` regarde s'il y a un `chemical`/`fluid` dedans).
+
+Chaque entrée ressort avec son `kind ∈ {item, fluid, chemical}`, et `_fc_entry` jette ce qui est vide (`minecraft:empty`, quantité ≤ 0) pour ne pas créer de slots fantômes.
+
+<Callout type="info">
+Mekanism 1.21 a fusionné gas / slurry / infuse / pigment en un seul concept « chemical ». Côté normaliseur, ces cinq mots déclenchent tous le même `kind: "chemical"` — un seul type à raisonner au lieu de cinq.
+</Callout>
+
+### Ré-injecter les poules
+
+Pour le breeding qui n'arrive jamais dans le dump KubeJS, j'extrais les recettes directement du jar `roostultimate` de l'instance FTB (en lecture seule), et `ingest_breeding.py` les reshape vers la forme standard que le normaliseur sait déjà lire.
+
+```python
+# ingest_breeding.py — left-chicken + right-chicken + food → inputs
+_INPUT_KEYS = ("left-chicken", "right-chicken", "food")
+
+def reshape(entry):
+    j = entry.get("json") or {}
+    inputs = [j[k] for k in _INPUT_KEYS if j.get(k)]
+    output = j.get("output")
+    if not inputs or not output:
+        return None
+    rtype = j.get("type", "chicken_roost:basic_breeding")
+    return {"id": entry["id"], "type": rtype,
+            "json": {"type": rtype, "inputs": inputs, "output": output}}
+```
+
+Détail qui compte : je ne prends que les fichiers `nonparents/` (111 d'entre eux). Les `parents/` sont des cycles d'auto-duplication (une poule + elle-même → la même poule), inutiles à un arbre et sources de boucles. Une fois reshapées, ces recettes passent par le normaliseur générique comme n'importe quelle autre.
+
+### La migration de schéma
+
+Côté Supabase, deux colonnes : `cw_items.kind` et `cw_recipe_io.kind` (défaut `item`). Le résolveur (`cw_resolve`) trimballe désormais le `kind` dans ses totaux (les quantités en mB pour les fluides), **mais continue de relier output → input par id seulement.** C'est l'astuce : comme le matching reste sur l'id, les chaînes de fluides se reconnectent toutes seules dès que les deux côtés existent enfin dans les données. ([Le résolveur, je l'ai décortiqué ici.](/posts/arbre-craft-modde-cycles-postgres/))
+
+## La leçon
+
+Après re-push : **25428 recettes / 17043 items / 65996 I/O** — dont ~337 chimiques en entrée et ~40 en sortie, ~533 fluides en entrée et ~62 en sortie. La Netherite Chicken remonte maintenant ses ~13 étapes de croisement jusqu'aux poules de base. Et le Polonium Pellet déroule toute sa chaîne de gaz Mekanism. Les arbres ne meurent plus dans le vide.
+
+<Callout type="fix" label="Leçon">
+Un normaliseur qui **jette** ce qu'il ne comprend pas est un mensonge silencieux. Le mien droppait 1 recette sur 40 sans broncher. S'il avait **loggé** « 559 I/O inconnus ignorés » au premier run, j'aurais corrigé le jour un au lieu de le découvrir par hasard sur une poule. Sur du parsing best-effort : échoue fort sur l'inconnu, ne le balaie pas sous le tapis.
+</Callout>
+
+<Callout type="fix" label="Leçon">
+Persiste le dump brut. Quand l'amont est cher (ici un lancement de jeu headless à 9 Go, candidat à l'OOM), garder le `/tmp/..._raw.json` sur disque transforme chaque itération du normaliseur de 20 minutes risquées en 3 secondes. C'est ce qui m'a permis de tâtonner sur la zoologie des formes de fluides sans jamais rebooter le client.
+</Callout>
+
+Il reste des bizarreries honnêtes que j'assume. `minecraft:egg` traîne une recette par défaut parasite (`extendedae:circuit_cutter`) qui le fait apparaître un peu salement sous les poules de couleur — l'œuf est en vrai un drop de mob, pas un craft. Et certaines poules de base (Bone, Flint, Quartz, Sand…) sont de **vraies primitives** : on les obtient en jetant la ressource au sol, une mécanique de monde de Roost, pas une recette. Là, l'arbre s'arrête à juste titre — ce sont les bonnes feuilles.
+
+Un angle mort coûte rarement cher d'un coup. Il coûte une recette sur quarante, silencieusement, jusqu'à ce qu'une poule en netherite refuse de t'avouer comment on la fabrique.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · premier pack : StoneBlock 4.*

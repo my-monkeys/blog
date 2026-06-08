@@ -1,0 +1,161 @@
+---
+title: "Rendre un modpack Minecraft pixel-perfect sur le web — sans une ligne de WebGL"
+date: 2026-06-04
+type: article
+excerpt: "FTB Quests dessine son arbre de quêtes dans le jeu. Je voulais le même rendu, à l'identique, dans un navigateur. La solution : lire le code source du mod pour en extraire un « render profile », et reporter chaque constante en canvas 2D."
+tags: ["minecraft", "modding", "canvas", "reverse-engineering", "rendering"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+
+Je voulais un wiki web pour mes modpacks Minecraft, et la première vue devait être l'arbre de quêtes FTB Quests — celui qu'on voit dans le jeu, avec ses nœuds ronds, ses lignes de dépendance, ses textures. Pas un screenshot. Le **vrai** rendu, interactif, dans le navigateur. Le piège, c'est que « ressembler à » et « être identique à » sont deux mondes différents. Voici comment j'ai porté le moteur de rendu de FTB Quests en canvas 2D, en lisant son code Java pour ne rien inventer à l'œil.
+
+---
+
+## Pourquoi pas un screenshot (ni de la 3D)
+
+La solution flemme, c'était de capturer l'écran du jeu. Mais un screenshot n'est ni zoomable, ni cliquable, ni à jour. Je voulais paner/zoomer, survoler un nœud, suivre les dépendances. Donc rendu réel.
+
+Mon premier prototype (`stoneblock-quests`) tentait carrément du **Three.js** pour afficher les icônes d'items en 3D, comme JEI les fait tourner. C'était joli et c'était une mauvaise idée :
+
+- ça embarquait WebGL + une lib 3D pour un rendu qui, à l'écran, est de la 2D plate ;
+- ça ne tournait pas dans les navigateurs headless que j'utilise pour l'automatisation (pas de contexte WebGL) ;
+- et surtout, fidélité ≠ 3D. FTB Quests dessine son arbre en 2D, point. Reproduire de la 2D avec un pipeline 3D, c'est se compliquer la vie pour des artefacts garantis.
+
+J'ai tout jeté et je suis reparti sur du **canvas 2D pur**. Bonus inattendu : le rendu marche désormais dans n'importe quel Chromium headless, ce qui me sert pour générer des aperçus.
+
+<Callout type="fix" label="Leçon">
+Avant de choisir une techno de rendu, regarde ce que la source dessine vraiment. FTB Quests est de la 2D plate — toute couche 3D était de la complexité pure perte. Le canvas 2D était à la fois plus simple, plus portable, et plus fidèle.
+</Callout>
+
+## L'idée clé : extraire un « render profile » du code source
+
+Pour être fidèle, j'avais deux options. Soit je tâtonne à l'œil — « ce gris a l'air un peu plus foncé, allez +10 » — soit je vais chercher les vraies constantes **dans le code du mod**. J'ai cloné les sources :
+
+- `FTBTeam/FTB-Quests` au tag épinglé **v2101.1.25** (branche `1.21.1/main`) — un patch au-dessus du `2101.1.24` de mon instance StoneBlock 4, mais le code de rendu est identique ;
+- `FTBTeam/FTB-Library` (même branche).
+
+Les deux clones vivent dans `tool/profiles/_src/`, gitignoré. Les valeurs par défaut du thème sont dans un fichier de ressources du mod, `assets/ftbquests/ftb_quests_theme.txt`.
+
+De là, j'ai construit un fichier unique, machine-readable : `tool/profiles/neoforge-1.21.json`. C'est le **render profile** : toutes les constantes de rendu, traduites depuis la source, validées par un `schema.json` (JSON Schema draft-07) via `ftbq/profile.py`. Et surtout, un doc de provenance qui audite **chaque valeur** contre une ligne de source précise.
+
+<Mermaid
+  caption="Le pipeline : la source du mod devient un profil JSON, que le viewer canvas applique"
+  code={`
+flowchart LR
+  A["FTB-Quests<br/>(source Java, tag v2101.1.25)"] --> B["render profile<br/>neoforge-1.21.json"]
+  B --> V["validation<br/>schema.json + profile.py"]
+  V --> C["viewer canvas 2D<br/>QuestBook (questCanvas.ts)"]
+  D["data.json<br/>(quêtes du pack)"] --> C
+  E["bank d'assets<br/>(icons / shapes / images)"] --> C
+`}
+/>
+
+À quoi ressemble ce profil ? Un extrait :
+
+```json
+{
+  "grid": { "cellPx": 28, "zoomMin": 4, "zoomMax": 28, "zoomDefault": 16 },
+  "node": { "baseSizePx": 24, "iconScale": 0.6667,
+            "drawOrder": ["shape", "background", "outline", "icon"] },
+  "colors": { "incomplete": "#ffffff", "started": "#00ffff",
+              "complete": "#56ff56", "locked": "#999999", "outline": "#212121" }
+}
+```
+
+Chacune de ces valeurs a une histoire. Le `cellPx: 28`, par exemple, n'est pas un nombre rond choisi au hasard.
+
+## Reporter les constantes, une par une
+
+Le cœur du boulot, c'était de tracer chaque constante du rendu jusqu'à sa ligne d'origine. Quelques-unes que j'ai trouvées particulièrement satisfaisantes à reconstituer :
+
+**La taille d'une cellule de grille.** Dans le jeu, l'espacement entre deux quêtes n'est pas une constante : il dérive du zoom. La taille d'un bouton est `bs = zoom * 3/2` et l'espacement `bp = zoom * quest_spacing / 4`. Le nombre de pixels par unité de grille, c'est `bs + bp`. Au zoom par défaut 16, avec `quest_spacing = 1.0` : `bs = 24`, `bp = 4`, donc **28 px par unité**. D'où le `cellPx: 28`. Le zoom est clampé entre 4 et 28, par pas de 4.
+
+**Un nœud, c'est 4 couches de texture empilées.** C'est le piège classique : on croit qu'un nœud de quête est « un cercle avec une icône ». En vrai, `QuestButton.draw` dessine quatre couches dans cet ordre :
+
+<Mermaid
+  caption="Les 4 couches d'un nœud, dans l'ordre de tracé de QuestButton.draw"
+  code={`
+flowchart TB
+  S["1. shape<br/>teinté DARK_GRAY #212121"] --> B["2. background<br/>blanc, alpha 150"]
+  B --> O["3. outline<br/>couleur d'état"]
+  O --> I["4. icon<br/>taille 2/3·w, centrée"]
+`}
+/>
+
+La couleur de la couche `outline` encode l'état de la quête : non commencée `#fff`, en cours `#0ff` (cyan), complétée `#56ff56` (vert), verrouillée `#999`. L'icône fait `2/3 * w * iconScale`, centrée — la constante 2/3 vient littéralement de `int s = (int)(w * (2F/3F) * quest.getIconScale())` dans la source.
+
+**Les lignes de dépendance.** Pas un simple trait. FTB dessine un quad texturé de centre à centre, avec un dégradé (l'extrémité « prérequis » à 3/4 de luminosité), d'une largeur `zoom * 0.17 / 4 * 3` — soit **2,04 px** au zoom 16. Et un détail qui m'aurait coûté des heures à deviner : par défaut, la ligne **n'est pas animée** (`dependency_line_unselected_speed` vaut 0). Si je l'avais animée « parce que ça fait joli », j'aurais été infidèle à l'original.
+
+<Callout type="info">
+Le doc de provenance liste, pour chaque valeur, le fichier et la ligne source. Quand un mainteneur de FTB changera une constante, je saurai exactement quoi re-vérifier — au lieu de re-tâtonner tout le rendu à l'œil.
+</Callout>
+
+## Le moteur : `QuestBook`, 100 % canvas 2D
+
+Le viewer est une classe `QuestBook` dans `questCanvas.ts`, framework-agnostic (le React autour ne gère que la barre latérale, la recherche, le popup). Tout le rendu est en 2D : boucle `requestAnimationFrame`, pan/zoom à la molette, hit-test au pointeur, caches d'images et de teintes, `fitView` pour cadrer un chapitre, le `drawNode` à 4 couches, les lignes de dépendance, les images de décoration, et un mini-moteur de texte Minecraft (`mcText`) qui traduit les codes couleur `§` en HTML.
+
+La teinture des textures (shapes, fond) se fait en canvas via `globalCompositeOperation = "source-in"` puis un `fillRect` de la couleur — exactement la « teinte par couleur de vertex » de FTB, transposée en compositing 2D.
+
+## La war story : pixel-fidèle, ça veut aussi dire le bon z-order
+
+Le bug le plus instructif n'était pas une couleur, ni une taille. C'était l'**ordre de tracé**.
+
+Chaque chapitre peut poser des images de décoration en fond (un portail stylisé, un fond arrondi…). Mon moteur les dessinait dans l'ordre du tableau `ch.images`. Logique. Sauf que FTB, lui, les peint **triées par leur champ `order`** dans le SNBT — plus la valeur est basse, plus l'image est en arrière-plan. Pas l'ordre de la liste.
+
+Résultat : une décoration avec `order: 0` se retrouvait dessinée **sous** une autre à `order: -3`, alors qu'elle aurait dû passer par-dessus. Visuellement, le fond bouffait le décor de premier plan. Subtil, mais une fois remarqué, impossible à ignorer.
+
+Le fix tient en une ligne, posée une fois par chapitre au moment du layout :
+
+<CodeDiff
+  lang="typescript"
+  beforeLabel="Avant : ordre de la liste"
+  afterLabel="Après : tri par order croissant"
+  caption="relaxChapter — les images de déco doivent suivre l'ordre de FTB, pas celui du tableau"
+  before={`// les images dans l'ordre où elles arrivent
+(ch.images || []).forEach(im => draw(im));`}
+  after={`// FTB peint les images par 'order' (plus bas = plus en arrière),
+// pas dans l'ordre de la liste — trier une fois ici.
+(ch.images || []).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));`}
+/>
+
+<Callout type="fix" label="Leçon">
+« Pixel-fidèle » ne s'arrête pas aux couleurs et aux tailles. L'**ordre de composition** fait partie du rendu. Une couche peinte au bon endroit mais au mauvais moment est aussi fausse qu'une couleur ratée.
+</Callout>
+
+## Deux langages, un seul contrat
+
+Détail qui peut casser tout en silence : la chaîne de build est en Python (elle récolte les assets dans une « bank »), le viewer est en TypeScript. Les deux doivent s'accorder sur **le même nom de fichier** pour chaque asset.
+
+La règle est minuscule mais non négociable : pour transformer une référence d'item (`minecraft:item/compass`) ou une texture en clé de bank, on retire un éventuel `.png` final, puis on remplace `:` et `/` par `_`. Le Python le fait dans `bank.asset_key`, le JS dans `assetKey` :
+
+```typescript
+// JS — doit produire EXACTEMENT la même clé que le Python
+export function assetKey(ref: string): string {
+  if (ref.endsWith(".png")) ref = ref.slice(0, -4);
+  return ref.replace(/[:/]/g, "_");
+}
+```
+
+Si les deux divergent d'un caractère, l'icône ne casse pas avec une erreur : elle disparaît, silencieusement, remplacée par un fallback. Le genre de bug qu'on ne voit que si on connaît l'item qui aurait dû être là.
+
+## Les limites, honnêtement
+
+Ce n'est pas parfait, et je préfère le dire :
+
+- **Une poignée d'icônes restent irrésolvables.** Une vingtaine d'items utilisent un rendu dynamique côté jeu (modèles générés à la volée, items à `BlockEntityWithoutLevelRenderer`) que mon harvester d'assets ne sait pas capturer en image plate. Pour ceux-là, le viewer tombe sur l'icône de type de tâche, ou à défaut sur un petit glyphe (`✓`, `?`, `XP`…). C'est lisible, mais ce n'est pas l'item exact.
+- **Certaines descriptions de quête contiennent des composants de texte JSON bruts** que mon `mcText` ne parse pas encore complètement. La plupart du temps ça passe (codes `§`, raw-text simples), mais les cas les plus tordus s'affichent dégradés.
+
+Rien de bloquant pour un wiki de consultation, mais ce sont des trous connus, pas de la magie.
+
+## Conclusion
+
+Le truc que je retiens : la fidélité ne vient pas du talent à l'œil, elle vient de la **source**. Extraire un profil de rendu auditable depuis le code du mod, puis reporter chaque constante en canvas 2D, c'est plus lent au départ qu'un screenshot — mais ça donne un rendu vivant, portable, et défendable ligne par ligne. Et accessoirement, ça tourne partout, même sans WebGL.
+
+Le mod qui rend les icônes d'items mérite son propre récit, et la généralisation du prototype jetable en outil aussi — mais ça, c'est pour d'autres posts.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · premier pack : StoneBlock 4.*

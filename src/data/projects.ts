@@ -22,6 +22,7 @@ export const PROJECTS: readonly Project[] = [
   { slug: 'mapmap', name: 'Mapmap', url: 'https://mapmap.my-monkey.fr' },
   { slug: 'michto-scale', name: 'Michto Scale', url: 'https://michto-scale.my-monkey.fr' },
   { slug: 'milkylog', name: 'MilkyLog', url: 'https://milkylog.my-monkey.fr' },
+  { slug: 'modpacks-wiki', name: 'Modpacks Wiki', url: 'https://modpacks.my-monkey.fr' },
   { slug: 'monkey', name: 'Monkey', url: 'https://monkey.my-monkey.fr' },
   { slug: 'movies', name: 'Movies', url: 'https://movies.my-monkey.fr' },
   { slug: 'papers', name: 'Papers', url: 'https://papers.my-monkey.fr' },

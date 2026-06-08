@@ -1,0 +1,195 @@
+---
+title: "Calculer l'arbre de craft d'un modpack — et les cycles qui le cassent"
+date: 2026-06-08
+type: article
+excerpt: "« Combien de matières premières pour fabriquer ça ? » Sur un modpack à 25 000 recettes, la réponse est un arbre — et l'arbre est plein de cycles qui le font tourner en rond. Récit d'un résolveur en CTE récursive Postgres."
+tags: ["postgres", "algorithms", "recursive-cte", "minecraft", "supabase"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+
+Sur mon wiki de modpack, il y a une question que tout le monde se pose en jeu : « pour fabriquer *ça*, il me faut quoi à la base ? ». La réponse, c'est un arbre de craft : tu déplies chaque recette jusqu'aux matières premières. Sauf que sur StoneBlock 4 — **25 433 recettes**, **17 050 items**, **66 102 lignes d'entrées/sorties** dans Supabase — cet arbre ne se déplie pas tout seul. Il est truffé de **cycles** : des recettes réversibles qui le font tourner en rond. C'est l'histoire d'un résolveur, et surtout des pièges qu'il a fallu désamorcer.
+
+---
+
+## Les données, vite fait
+
+Le modèle est plat et bête, exprès. Une table `cw_recipes` (un id de recette + son `type` — `minecraft:crafting_shaped`, `minecraft:smelting`, une machine moddée…), et une table `cw_recipe_io` qui liste, par recette, ses lignes : `role` = `in` ou `out`, `item`, `count`, `is_tag`. Tout est en lecture publique (RLS). Du côté registre, `cw_pack_items` recense les **30 363** items connus du pack.
+
+À partir de ça, calculer « les matières premières totales pour X quantité de Y » est une marche récursive : je pars de l'item, je prends *une* recette qui le produit, j'en déplie les entrées, je recommence, et je m'arrête sur les feuilles — les items qu'aucune recette ne fabrique (minerais, sable, eau…).
+
+Deux subtilités avant même de parler des cycles.
+
+**Le `ceil`.** Une recette produit `N` items d'un coup. Pour en obtenir `qty`, il faut `ceil(qty / N)` exécutions de la recette — pas un nombre fractionnaire, on ne lance pas une recette 2,3 fois. Chaque entrée vaut donc `count × ceil(qty / N)`. Conséquence agréable : toutes les quantités restent **entières** (avec un reste réaliste qui se propage vers le bas). Tu ne verras jamais « 2,3 lingots ».
+
+**Les cycles.** C'est tout le reste de l'article.
+
+## Le résolveur : une CTE récursive
+
+Le cœur, c'est une fonction Postgres `cw_resolve(pack, item, qty, choices)` — une `WITH RECURSIVE` qui retourne un JSON `{ totals, machines, unresolved }`. La récursion descend l'arbre, et la clause `CYCLE` de Postgres marque les nœuds qui bouclent au lieu de récurser à l'infini :
+
+```sql
+-- (simplifié)
+with recursive tree (item, qty, recipe_id, depth) as (
+  select p_item, p_qty,
+         coalesce(p_choices->>p_item, cw_default_recipe(p_pack, p_item)), 0
+  union all
+  -- crafts entiers : ceil(besoin / sortie-par-craft), chaque entrée = count * crafts
+  select io.item,
+         io.count * ceil(t.qty / greatest(
+           (select sum(o.count) from cw_recipe_io o
+            where o.recipe_id = t.recipe_id and o.role = 'out' and o.item = t.item), 1)),
+         coalesce(p_choices->>io.item, cw_default_recipe(p_pack, io.item)),
+         t.depth + 1
+  from tree t
+  join cw_recipe_io io on (io.recipe_id = t.recipe_id and io.role = 'in')
+  where t.recipe_id is not null and t.depth < 64
+) cycle item set is_cycle using path
+```
+
+Les `totals` sont la somme des feuilles `recipe_id is null and not is_cycle` (les vraies matières premières) ; `machines` compte les types de recette traversés ; `unresolved` ramasse les items marqués `is_cycle`. Le `depth < 64` est un garde-fou : `CYCLE` attrape les vraies boucles, donc atteindre cette profondeur signifie un graphe pathologique, pas un craft normal.
+
+Tout ça marche. Le problème n'est pas la mécanique de descente — c'est **quelle recette on choisit** à chaque item.
+
+## Là où ça déraille : les recettes réversibles
+
+Un modpack est plein de recettes qui font l'aller *et* le retour. Le bloc de stockage : 9 items → 1 bloc, et 1 bloc → 9 items. Les recettes « deconstruct ». Les conversions de matière de ProjectE. Si, pour un item, la recette *par défaut* qu'on choisit est l'une de ces formes inverses, l'arbre s'ouvre sur une recette qui **consomme la chose même qu'on essaie de fabriquer**.
+
+Cas réel : **Red Matter** (`projecte:red_matter`). Sa recette par défaut « la plus simple » s'ouvrait sur `red_matter_block_deconstruct` — le bloc de Red Matter qui se casse en 4 Red Matter. Donc : pour fabriquer de la Red Matter, déconstruire un bloc de Red Matter… fait de Red Matter. Circulaire. Pareil pour l'**Antimatter**, le **Polonium**, le **Plutonium** : un cycle bloc → item → bloc.
+
+<Mermaid
+  caption="Le piège : la recette par défaut ouvre sur l'arête inverse (bloc → item), qui reboucle."
+  code={`flowchart LR
+  P["Red Matter (P)"] -->|"recette deconstruct"| B["Red Matter Block"]
+  B -->|"4 Red Matter"| P
+  P -.->|"recette réelle voulue"| F["aeternalis_fuel + dark_matter"]`}
+/>
+
+La clause `CYCLE` empêche bien le crash — l'arbre ne tourne pas à l'infini, il marque le nœud `unresolved`. Mais le résultat est inutile : « pour faire de la Red Matter, il te faut… de la Red Matter ». Personne n'a appris quoi que ce soit.
+
+<Callout type="info">
+`CYCLE` te sauve du crash, pas du non-sens. Un cycle correctement détecté reste un cycle : si ta recette par défaut est l'arête inverse, l'utilisateur lit une tautologie. Le vrai travail, c'est de ne pas *choisir* cette arête.
+</Callout>
+
+## Le fix : un défaut conscient des cycles
+
+La sélection de la recette par défaut vit dans une fonction SQL, `cw_default_recipe(pack, item)`, **recalculée à chaque requête** — délibérément pas une table « une recette par item » figée, pour qu'elle reste correcte quand les données du pack changent. Au départ, son tri était naïf : recette de craft avant fourneau avant machine, recette vanilla d'abord, puis **le moins d'entrées possible** (la plus « simple »). C'est ce « moins d'entrées » qui élisait les recettes deconstruct — un bloc qui se casse, c'est *une* entrée.
+
+La correction ajoute un premier critère de tri : **toute recette qui forme un cycle passe en dernier**. Deux formes de cycle :
+
+- **(a) auto-référence à 1 saut** : la sortie est aussi une entrée directe (le verre qu'on ciselle en verre).
+- **(b) cycle « deconstruct »** : une entrée non-tag `I` est produite par une *autre* recette qui consomme notre sortie `P`, **et** `I` est **purement dérivée de `P`** (aucune recette ne fabrique `I` sans `P`).
+
+<CodeDiff
+  lang="sql"
+  beforeLabel="Tri naïf"
+  afterLabel="Tri conscient des cycles"
+  caption="cw_default_recipe — le critère ajouté (simplifié)"
+  before={`order by
+  -- craft < fourneau < machine
+  rank_type(r.type),
+  -- vanilla d'abord
+  (r.recipe_id like 'minecraft:%') desc,
+  -- LE MOINS D'ENTRÉES → élit les recettes "deconstruct"
+  (select count(*) from cw_recipe_io i
+     where i.recipe_id = r.recipe_id and i.role = 'in'),
+  r.recipe_id`}
+  after={`order by
+  -- NOUVEAU : toute recette qui forme un cycle passe EN DERNIER
+  (case when forms_cycle(r, p_item) then 1 else 0 end),
+  rank_type(r.type),
+  (r.recipe_id like 'minecraft:%') desc,
+  (select count(*) from cw_recipe_io i
+     where i.recipe_id = r.recipe_id and i.role = 'in'),
+  r.recipe_id`}
+/>
+
+Le `forms_cycle` du cas (b), en vrai, est un `exists` imbriqué qui dit : *« cette entrée `I` est fabriquée par une recette qui consomme `P`, et il n'existe aucune recette produisant `I` qui ne consomme pas `P` »* (simplifié) :
+
+```sql
+-- I est produit par une recette qui consomme notre sortie P...
+exists (
+  select 1 from cw_recipe_io o
+  join cw_recipe_io ip on (ip.recipe_id = o.recipe_id
+                           and ip.role = 'in' and ip.item = p_item and not ip.is_tag)
+  where o.role = 'out' and o.item = i2.item and o.recipe_id <> r.recipe_id
+)
+-- ...ET aucun producteur de I ne se passe de P (sinon I a une vraie voie "base")
+and not exists (
+  select 1 from cw_recipe_io o2
+  where o2.role = 'out' and o2.item = i2.item and o2.recipe_id <> r.recipe_id
+    and not exists (
+      select 1 from cw_recipe_io ip2
+      where ip2.recipe_id = o2.recipe_id and ip2.role = 'in'
+        and ip2.item = p_item and not ip2.is_tag
+    )
+)
+```
+
+## La partie fine : « purement dérivé »
+
+Le test délicat, ce n'est pas (a), c'est le **« purement dérivé »** de (b). Mon premier réflexe avait été un seuil de comptage — « si l'entrée consomme la sortie en grande quantité, c'est une forme inverse ». Faux. Et le contre-exemple est cruel : le bloc de plutonium *et* la conversion de fuel de ProjectE consomment leur cible **×1** tous les deux. Aucun seuil ne les sépare.
+
+Ce qui les sépare, c'est la **structure**. Une vraie forme de stockage/inverse (`red_matter_block`, le bloc de plutonium) n'existe *que* parce qu'on a déjà la matière : **aucune** recette ne la produit autrement. À l'inverse, le `mobius_fuel` de ProjectE *ressemble* à un intermédiaire qui boucle, mais il a aussi une recette à base de charbon alchimique — il a donc une voie vers les matières premières. C'est un **vrai intermédiaire**, pas une forme inverse. Le `not exists` ci-dessus est exactement ce test : « existe-t-il un producteur de `I` qui se passe de `P` ? ». Si oui → intermédiaire légitime, on n'y touche pas. Si non → forme de stockage pure, on la déprioritise.
+
+<Callout type="fix" label="Leçon">
+Pour distinguer une forme inverse d'un intermédiaire légitime, ne compte pas — interroge la structure. La bonne question n'est pas « combien ça consomme ? » mais « existe-t-il une voie vers cet item qui ne passe **pas** par notre cible ? ». S'il n'en existe aucune, c'est une forme de stockage pure et il faut l'éviter par défaut.
+</Callout>
+
+## Accord front / back : un seul défaut
+
+Il y a un wiki *visuel* par-dessus : le graphe de craft (React + `@xyflow`). Et un panneau « Totaux » à côté. Le piège classique aurait été que les deux divergent — le graphe ouvre sur une recette, le panneau en compte une autre.
+
+Pour l'éviter, le graphe consomme **le même défaut serveur**. Dans `recipes.ts`, `defaultRecipe()` appelle la RPC `cw_default_recipe` (mise en cache par item), et `tree.ts` `buildNode` l'utilise en priorité, avec un `pickDefault` local en repli si la RPC ne renvoie rien :
+
+```ts
+// tree.ts buildNode (simplifié)
+const serverDefault = choices[item] ? null : await defaultRecipe(item);
+recipeId =
+  choices[item] ??
+  (serverDefault && recipes.some((r) => r.recipe_id === serverDefault)
+    ? serverDefault
+    : pickDefault(recipes, item));
+```
+
+Le `pickDefault` local applique exactement le même ordre (self-ref en dernier, craft < fourneau < machine, vanilla, moins d'entrées). Résultat : le graphe et les totaux ne se contredisent jamais, et **aucun des deux** n'ouvre sur une recette « depuis le bloc » qui boucle.
+
+## Le second virage : les totaux depuis l'arbre affiché
+
+À l'origine, le panneau « Totaux » appelait `cw_resolve` lui aussi — une résolution récursive complète. Mais sur les cycles profonds, ça cassait : `CYCLE` arrête la boucle, sauf que le total devient bancal dès que plusieurs branches rebouclent en cascade.
+
+J'ai donc déplacé les totaux vers **l'arbre affiché seulement**. `CraftGraph.buildSummary` somme les feuilles de la *frontière visible* — base, craft replié, cycle, ou tag — et tally les machines depuis les nœuds dépliés :
+
+```ts
+// buildSummary (simplifié) : un nœud sans enfants = une feuille à compter
+for (const n of model.nodes.values()) {
+  if (n.childIds.length === 0) add(totals, n);          // feuille → matière
+  else if (n.recipeId) machines.set(/* type de la recette choisie */);
+}
+```
+
+Conséquence élégante : déplier un nœud le **remplace** dans les totaux par ses propres feuilles. Ce que tu vois à l'écran *est* le total. Ça contourne complètement la casse sur cycle profond. (`cw_resolve` existe toujours et sert encore au matching récursif d'ids, mais le panneau ne l'appelle plus.)
+
+## Ce que ça donne — et ce qui reste cassé
+
+Côté résultats, le fix tient ses promesses. **Red Matter** s'ouvre sur sa vraie recette (`aeternalis_fuel` + `dark_matter`) au lieu de se déconstruire elle-même. **Antimatter**, **Polonium**, **Plutonium** se résolvent jusqu'au bout. La **Netherite Chicken** (oui, on élève des poulets de netherite ici) descend ses ~13 étapes de breeding jusqu'aux poulets de base. Le **Polonium Pellet** suit sa chaîne de gaz Mekanism.
+
+Mais je ne vais pas prétendre que c'est résolu à 100 %. Deux trous, honnêtement.
+
+**Les chaînes de fuel de ProjectE sont bidirectionnelles.** `aeternalis_fuel` ↔ `mobius_fuel` ↔ `alchemical_coal` se convertissent dans les deux sens, tous en 1-pour-1. Mon heuristique évite les cycles *purs*, mais elle ne sait pas, entre deux arêtes valides, **laquelle va vers la base**. Il n'y a aucun cycle pur à casser ici — juste un choix de direction. Pour le faire correctement il faudrait une notion de **distance topologique** (ou la valeur EMC de ProjectE, qui encode justement « combien de matière première ça vaut »). Pas fait.
+
+**La décompression médiée par tag passe sous le radar.** Mon test (b) ne regarde que les entrées *non-tag*. Or `iron_ingot` peut venir du tag `c:storage_blocks/iron` (le bloc de fer, via un tag). Comme c'est une entrée-tag, le test ne l'attrape pas, et le fer « se résout » sur le tag de bloc de stockage comme s'il était une base. Bug pré-existant, toujours là.
+
+<Callout type="warn">
+Dans un graphe à arêtes réversibles, « le plus court chemin » ne suffit pas : il te faut une notion de **direction vers la base**. Une heuristique structurelle pragmatique (« purement dérivé ») couvre ~90 % des cas. Les 10 % restants — choisir la bonne direction entre deux conversions 1-pour-1 — sont un vrai problème de distance dans le graphe, pas un cycle à casser.
+</Callout>
+
+## Conclusion
+
+Le truc que je retiens : le calcul d'un arbre de craft *a l'air* d'un simple parcours récursif, et la mécanique l'est. La difficulté réelle est ailleurs — dès qu'un graphe a des arêtes réversibles, choisir « la recette par défaut » devient un mini-problème de théorie des graphes. Une heuristique structurelle bien choisie (interroger l'existence d'une voie alternative plutôt que compter) t'emmène loin. Le dernier kilomètre, lui, demande une vraie métrique de distance — et c'est exactement le genre de problème qu'on se garde pour plus tard.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · premier pack : StoneBlock 4.*

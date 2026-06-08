@@ -1,0 +1,185 @@
+---
+title: "Faire rendre Minecraft à lui-même : un mod NeoForge pour dumper 30 000 icônes"
+date: 2026-06-06
+type: article
+excerpt: "Pour mon wiki de modpack, il me fallait l'icône PNG de chaque item, fluide et mob du jeu — teintures et modèles dynamiques compris. La seule source fiable du rendu d'un item, c'est le jeu lui-même. Alors j'ai écrit un plugin JEI qui rend tout dans un FBO."
+tags: ["minecraft", "modding", "neoforge", "jei", "rendering", "tooling"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+
+Je voulais un wiki web pour un modpack Minecraft : un endroit où chaque item, chaque fluide, chaque mob a sa petite icône propre. Sauf qu'un modpack moderne, c'est ~30 000 items, dont beaucoup sont **teintés**, **paramétrés par composant**, ou rendus par un modèle dynamique au runtime. Aucun fichier `.png` posé bien sagement quelque part ne décrit ce que tu vois vraiment dans une slot d'inventaire. La seule source de vérité, c'est le moteur de rendu du jeu. Alors je l'ai fait rendre lui-même — via un mod NeoForge greffé sur JEI.
+
+---
+
+## L'approche naïve, et pourquoi elle casse
+
+Premier réflexe : un mod d'export d'icônes tout fait. `iconexporter` (de Cyclops) fait exactement ça — `/iconexporter export <scale>` te crache un PNG par item dans `icon-exports-x<scale>/`. Pratique, et ça marche… pour les items « plats ».
+
+Le problème, c'est tout le reste. Beaucoup d'items ne sont pas une texture statique :
+
+- les items **teintés** (les 16 couleurs d'un même objet partagent un modèle, la couleur vient d'un `DyeColor` appliqué au rendu) ;
+- les items à **BEWLR** (`BlockEntityWithoutLevelRenderer`) — boucliers, shulker boxes, bannières, et plein d'objets moddés qui se dessinent par du code custom, pas par un modèle JSON ;
+- les items **paramétrés par composant** (data components 1.21), dont l'apparence dépend de leur NBT.
+
+Le test qui m'a fait abandonner l'approche naïve : les **16 postboxes de Create**. `iconexporter` me les a toutes sorties **identiques** — vides, sans la teinture qui les distingue. Si l'exporter ne passe pas par le vrai pipeline de rendu d'item, il rate tout ce qui est dynamique. Et un modpack, c'est *plein* de dynamique.
+
+<Callout type="fix" label="Leçon">
+Si l'apparence d'un objet dépend du runtime (teinture, composant, renderer custom), aucun export « par fichier » ne sera fidèle. Il faut passer par le renderer du jeu — celui-là même qui dessine la slot d'inventaire.
+</Callout>
+
+## Pourquoi se greffer sur JEI
+
+Le renderer d'item du jeu (`GuiGraphics.renderItem`), je sais l'appeler. Mais il me manquait deux choses pour le faire **universellement** : la liste exhaustive de tout ce qui est affichable (pas que les items — les fluides, les produits chimiques de Mekanism…), et l'**id de registre** exact de chaque ingrédient pour nommer le fichier de sortie.
+
+JEI résout les deux d'un coup. C'est *son métier* : il dessine déjà **chaque type d'ingrédient** via son renderer enregistré, et son `IIngredientHelper.getResourceLocation(ingredient)` me donne l'id exact. Me greffer dessus, c'est récupérer gratuitement l'universalité — sans dépendance compile sur Mekanism, Create ou quoi que ce soit.
+
+Le point d'entrée est un classique `@JeiPlugin` qui capture le runtime au démarrage :
+
+```java
+@JeiPlugin
+public class JeiDumperPlugin implements IModPlugin {
+    private static IJeiRuntime runtime;
+
+    public static IJeiRuntime getRuntime() { return runtime; }
+
+    @Override
+    public void onRuntimeAvailable(IJeiRuntime jeiRuntime) {
+        runtime = jeiRuntime; // tout le reste part de là
+    }
+}
+```
+
+JEI reste une dépendance `compileOnly` (l'API seule, depuis le maven BlameJared) ; le mod JEI complet est fourni au runtime par le modpack. Le mien ne pèse rien.
+
+## La technique centrale : rendre *dans* la frame
+
+Voilà le piège qui m'a coûté le plus de temps. Mon instinct était de rendre l'item « à côté » — ouvrir un framebuffer, dessiner, lire les pixels, fermer. Résultat : des PNG **transparents** ou noirs, systématiquement.
+
+La raison : `renderItem` (et les renderers JEI) supposent un **état GL valide** — atlas de textures bindé, shader GUI actif, projection ortho posée. Cet état n'existe que *pendant* une vraie frame de rendu GUI. Rendre hors-frame, c'est dessiner dans le vide.
+
+La solution : un `Screen` custom qui fait tout son travail **dans sa propre méthode `render()`**, donc dans une frame live. À chaque appel, il bind un `TextureTarget` offscreen, pose une projection ortho, dessine l'item agrandi ×8 pour remplir 128px, puis relit les pixels via `NativeImage.downloadTexture` et écrit le PNG. Squelette (simplifié) :
+
+```java
+target.bindWrite(true);
+RenderSystem.viewport(0, 0, ICON, ICON);
+// ortho GUI + depth test (les items sont des modèles 3D)
+RenderSystem.setProjectionMatrix(projection, VertexSorting.ORTHOGRAPHIC_Z);
+
+GuiGraphics local = new GuiGraphics(mc, buffers);
+local.pose().scale(8, 8, 1f);      // 16px -> 128px, pixelisé
+local.renderItem(stack, 0, 0);     // PAS renderItemDecorations : 0 compte/durabilité
+local.flush();
+
+try (NativeImage out = new NativeImage(NativeImage.Format.RGBA, ICON, ICON, false)) {
+    target.bindRead();
+    out.downloadTexture(0, false);
+    out.flipY();
+    if (hasContent(out)) out.writeToFile(outDir.resolve(name + ".png"));
+}
+```
+
+Détails qui comptent : je rends l'item **seul** (pas de décorations, donc pas de chiffre de stack ni de barre de durabilité), et je n'écris le fichier **que s'il a des pixels opaques** — un seuil de quelques pixels suffit. Comme ça, les ~700 items virtuels/techniques (l'air, `ae2:wrapped_generic_stack` & co.) qui ne dessinent rien sont comptés « blank » et zappés au lieu d'écrire un carré transparent.
+
+Pour ne pas freezer le client (headless, on y revient), chaque `render()` traite un batch — 48 items par frame via une petite machine à états. Les 30k items finissent en ~90s.
+
+<Callout type="info">
+Le `Screen` override `isPauseScreen()` et `shouldCloseOnEsc()` à `false` : on ne veut ni que le jeu se mette en pause (sinon plus de frames), ni qu'un ESC fantôme referme l'écran en plein dump.
+</Callout>
+
+## Quatre dumps, un seul mod
+
+À partir de cette mécanique « rendre-dans-la-frame », j'ai dérivé quatre sorties, chacune un mode déclenchable indépendamment.
+
+<Mermaid
+  caption="Les quatre triggers, leurs sorties, et la bank d'assets partagée"
+  code={`
+flowchart TD
+  J["/jeidump"] --> L["jei-layouts/ (slots + roles)"]
+  J --> BG["backgrounds PNG (~317)"]
+  I["/itemdump"] --> IT["item-icons/ (29655 items)"]
+  F["/fcdump"] --> FC["fluid-icons/ (345 fluides + chimiques)"]
+  M["/mobdump"] --> MO["mob-icons/ (460 sprite sheets)"]
+  IT --> BANK["bank d'assets 30372 @64px"]
+  FC --> BANK
+  MO --> BANK
+  L --> WIKI["wiki web"]
+  BG --> WIKI
+  BANK --> WIKI
+`}
+/>
+
+### `/jeidump` — les layouts de machine
+
+`JeiLayoutDumper` itère chaque catégorie de recette JEI, lit les coordonnées de slot et leur **rôle** (`INPUT` / `OUTPUT` / `CATALYST` / `RENDER_ONLY`) depuis un layout JEI, et écrit un JSON par catégorie. En prime, `JeiBgScreen` capture le **fond** de chaque GUI de machine — sans les items — en PNG (~317 sur 346 catégories). C'est ce qui permet à la vue craft du wiki d'afficher le **vrai GUI de la machine**, avec les items déposés aux coordonnées exactes dumpées. Pas une reconstitution approximative : le vrai cadre.
+
+### `/itemdump` — la bank d'items
+
+Le cœur. `ItemIconScreen` parcourt `BuiltInRegistries.ITEM`, fait un `new ItemStack(item)` et le rend via `renderItem` — donc avec teintures, composants et BEWLR corrects. Résultat : **29 655 items rendus sur 30 362** (les ~700 manquants sont les virtuels mentionnés plus haut). C'est précisément là que je rattrape les postboxes de Create qu'`iconexporter` ratait. La bank finale, après downscale du 128px brut (gitignoré) vers 64px, fait **30 372 icônes**.
+
+### `/fcdump` — fluides et produits chimiques
+
+Là où JEI brille. `IngredientIconScreen` énumère **tous les types d'ingrédients JEI non-item** et rend chacun via son `IIngredientRenderer` enregistré, en le nommant par son `getResourceLocation`. Aucun code spécifique à un mod. Résultat : **345 ingrédients (263 fluides + 82 produits chimiques Mekanism), 0 erreur**. J'en ai fusionné 265 dans la bank : l'eau ressort **bleue**, la lave **orange**, le polonium **vert**, les gaz avec leur teinte. Avant ça, mon front retombait sur un glyphe 💧/☁ générique — fonctionnel, mais moche et faux.
+
+### `/mobdump` — les mobs en 3D tournants
+
+Le plus satisfaisant. `EntityIconScreen` rend **chaque entité vivante** en **sprite sheet de turntable** : 12 frames, l'entité tournée autour de Y, vue en 3/4 avec une légère bascule. Le rendu passe par `InventoryScreen.renderEntityInInventory` — le même appel que l'aperçu d'entité dans l'inventaire — dans un FBO offscreen. Résultat : **460 sheets, 0 erreur**.
+
+Le point clé : ça rend l'**entité vivante**, pas un fichier de modèle. Donc c'est universel — ça marche pour les mobs vanilla (modèles en dur), pour GeckoLib, pour n'importe quoi que le jeu sait afficher. Si j'avais voulu lire les *fichiers* de modèle 3D, je me serais cogné le fait qu'ils ne sont pas universels : GeckoLib ne couvre qu'une quinzaine de mods, et les autres formats sont éclatés. Rendre l'entité live court-circuite tout ça.
+
+```java
+// vue 3/4 : flip Z (les entités GUI rendent à l'envers), tilt caméra, spin Y
+Quaternionf pose = new Quaternionf().rotateZ((float) Math.PI);
+Quaternionf cameraOrbit = new Quaternionf().rotateX(TILT);
+pose.mul(cameraOrbit);
+pose.rotateY(angle);   // 12 angles -> 12 frames de la sheet
+
+InventoryScreen.renderEntityInInventory(
+    local, F / 2f, feetY, scale, new Vector3f(0, 0, 0), pose, cameraOrbit, entity);
+```
+
+## Le déclenchement : commande, flag JVM, ou fichier
+
+Chaque dump a **trois** déclencheurs, parce que je le fais tourner sur un serveur **sans clavier**. En jeu, une commande client (`/jeidump`, `/itemdump`, `/fcdump`, `/mobdump`). En headless, soit un flag JVM (`-Djeidump.items=true`, `-Djeidump.fc=true`, `-Djeidump.mobs=true`, `-Djeidump.auto=true` pour les layouts), soit la simple présence d'un fichier `itemdump.trigger` / `fcdump.trigger` / `mobdump.trigger` / `jeidump.trigger` dans le `gameDir`.
+
+Le `touch` d'un fichier-trigger est le plus pratique : un `ClientTickEvent.Post` attend ~5 s que le monde se pose, vérifie le flag ou le fichier, et tire le dump une seule fois. Aucun input tapé requis.
+
+```java
+boolean enabled = "true".equalsIgnoreCase(System.getProperty("jeidump.items"))
+    || Files.exists(FMLPaths.GAMEDIR.get().resolve("itemdump.trigger"));
+if (enabled) { itemsFired = true; ItemIconDumper.dumpAll(LOGGER::info); }
+```
+
+Faire tourner ce client en headless sur mon serveur a été sa propre aventure — Xwayland, JRE bundlé, RAM partagée et un OOM killer trop gourmand. J'en ai fait [un post à part](/posts/minecraft-headless-oom-cookie-server/).
+
+## La récolte : trois pièges bêtes mais coûteux
+
+Les dumps écrivent dans l'instance ; il faut rapatrier ~30k fichiers. Trois murs, tous idiots :
+
+1. **`rsync` casse sur l'espace** dans le chemin d'instance `ftb stoneblock 4`. J'ai perdu un moment à quoter dans tous les sens avant de laisser tomber et de **streamer via `tar`** (`tar czf - … | tar xzf -`), insensible à l'espace.
+2. **`ls *.png` meurt au-delà de ~17k fichiers** (`Argument list too long`, la limite `ARG_MAX`). Pour compter, `find -maxdepth 1 -name '*.png' | wc -l` — pas de glob shell.
+3. **`iconexporter` itère en ordre de *registration*, pas alphabétique.** Si tu récoltes pendant qu'il écrit encore, des mods entiers ont l'air « manquants » alors qu'ils arrivent juste plus tard. Il faut **attendre que le compteur de fichiers se stabilise** avant de collecter.
+
+<Callout type="warn">
+Sur des dizaines de milliers de fichiers, les outils Unix du quotidien atteignent leurs limites silencieuses (`ARG_MAX`, globbing). `find … | wc -l` et un transfert en flux (`tar`) au lieu de `rsync` t'épargnent une demi-journée de fausses pistes.
+</Callout>
+
+## Les limites, honnêtement
+
+Ce n'est pas 100 % parfait, et c'est OK :
+
+- **~700 items virtuels** (air, stacks « wrappés » techniques) ne rendent rien → placeholder. Ce sont des objets qui n'ont, par nature, pas de représentation visuelle.
+- **~47 mobs ne rendent pas** : entités invisibles, marqueurs, projectiles « vivants » sans modèle affichable. Pour ceux-là je retombe sur l'**œuf de spawn** correspondant, et à défaut sur un glyphe. Acceptable pour un wiki — personne ne cherche l'icône d'une entité marqueur.
+
+La couverture réelle (29 655 items, 345 fluides/chimiques, 460 mobs, le tout avec **0 erreur** sur les fluides et les mobs) est largement suffisante pour un wiki utilisable. Et surtout, c'est **réutilisable** : le mod n'a rien de spécifique à StoneBlock 4. Je le pose dans le `mods/` de n'importe quelle instance NeoForge 1.21 avec JEU + JEI, je `touch` les triggers, et je récupère sa bank complète.
+
+## Conclusion
+
+La vraie bascule mentale, c'était d'arrêter de chercher « le fichier qui contient l'icône » — il n'existe pas pour la moitié des objets d'un modpack — et de demander au jeu de **se dessiner lui-même**, dans une frame réelle, en lui empruntant le pont universel qu'est JEI. Une fois ce principe posé, item / fluide / chimique / mob ne sont que quatre variations du même geste : bind un FBO, appelle le renderer du jeu, relis les pixels.
+
+Ces 30 372 icônes alimentent maintenant les vues du wiki — c'est l'objet d'un [autre article sur le rendu pixel-perfect sans WebGL](/posts/modpack-minecraft-pixel-perfect-sans-webgl/).
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · premier pack : StoneBlock 4.*
