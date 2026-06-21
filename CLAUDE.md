@@ -1,6 +1,6 @@
 # CLAUDE.md — `blog`
 
-Blog statique `blog.my-monkey.fr`. Astro 5 + MDX + Decap CMS + auto-changelog GitHub Releases. Spec complet : `../docs/superpowers/specs/2026-05-22-blog-my-monkey-design.md`.
+Blog statique `blog.my-monkey.fr`. Astro 5 + MDX + Decap CMS. Spec complet : `../docs/superpowers/specs/2026-05-22-blog-my-monkey-design.md`.
 
 ## Stack
 
@@ -29,11 +29,9 @@ src/
   scripts/animations.ts         # GSAP central
   lib/readingTime.ts
 public/admin/                   # Decap CMS (index.html + config.yml)
-scripts/sync-releases.{mjs,config.json}
 oauth/                          # Cloudflare Worker OAuth (deploy séparé)
 .github/workflows/
   build-and-release.yml         # build + gh release sur push main
-  sync-releases.yml             # cron 6h pull GitHub releases → posts update
 ```
 
 ## Commandes
@@ -43,16 +41,12 @@ npm install
 npm run dev              # http://localhost:4321
 npm run build            # → dist/ (Astro + Pagefind index + OG images)
 npm run preview
-npm test                 # Vitest (schemas, scripts)
-npm run sync-releases    # local, requires GH_TOKEN env
+npm test                 # Vitest (schemas, lib, registre projets)
 ```
 
 ## Variables d'environnement
 
-- `GH_TOKEN` (local, pour `sync-releases`) — token GitHub avec scope `repo`
-
-Secrets GitHub Actions :
-- `BOT_PAT` (PAT scope `repo` + `workflow`) — pour que `sync-releases` puisse pousser et déclencher `build-and-release`
+`build-and-release.yml` n'utilise que le `GITHUB_TOKEN` auto des Actions — aucun secret custom à configurer côté repo.
 
 Secrets Cloudflare Worker (`oauth/`) :
 - `GITHUB_CLIENT_ID`
@@ -66,11 +60,10 @@ Référencé dans `.monkey` (`post_deploy`).
 
 ## Workflow d'écriture
 
-Trois options, par ordre de praticité :
+Deux options, par ordre de praticité :
 
 1. **Decap CMS** (`blog.my-monkey.fr/admin`) — login GitHub → écrire → publish. Decap commit le `.mdx` dans `src/content/posts/`. Le webhook déclenche le rebuild.
 2. **Direct .mdx push** — éditer `src/content/posts/<slug>.mdx` localement, commit, push.
-3. **Auto-changelog** — `gh release create` dans un repo `my-monkeys/*` listé dans `scripts/sync-releases.config.json` → post `update` créé automatiquement dans les 6h.
 
 Tous les posts avec `draft: true` sont visibles en dev (`npm run dev`) mais filtrés en prod et du RSS/sitemap.
 
@@ -79,7 +72,7 @@ Tous les posts avec `draft: true` sont visibles en dev (`npm run dev`) mais filt
 | Type | Rendu | Usage |
 |---|---|---|
 | `article` | Page complète, hero + body | Long-form, idées, tutoriels |
-| `update` | Page courte, badge version | Auto-généré depuis GitHub Releases |
+| `update` | Page courte, badge version | Notes de version, écrites à la main |
 | `post-mortem` | Page complète, supporte `<Mortem>` | Debug épique, incidents |
 | `link` | Pas de page, redirect direct | Linkblog, partages |
 
@@ -189,7 +182,7 @@ draft: false
 Une ou deux phrases de commentaire perso. Le corps n'est PAS affiché en page (le clic dans le feed ouvre direct l'URL externe), mais reste utile pour le contexte si quelqu'un lit le `.mdx` sur GitHub.
 ```
 
-#### Update (manuel — sinon auto-généré par `sync-releases.mjs`)
+#### Update (note de version, écrite à la main)
 
 ```mdx
 ---
@@ -437,10 +430,6 @@ git push
 
 Marche dès que le setup Worker OAuth est fait (cf. "Setup one-shot" ci-dessous). UI web sur `https://blog.my-monkey.fr/admin/` → login GitHub → écris → publish → Decap commit pour toi → même pipeline.
 
-#### Option C — Auto (releases GitHub)
-
-Pour les `update` uniquement : `gh release create vX.Y.Z` dans n'importe quel repo listé dans `scripts/sync-releases.config.json` → post `update` créé automatiquement dans les 6h max (cron du workflow `sync-releases.yml`).
-
 ## Déploiement
 
 Via le pipeline **monkey** (cf. `../CLAUDE.md`). Particularité : ici le build et la `gh release` sont **automatisés** par `build-and-release.yml` (déclenché par push sur `main`). On ne build/release pas manuellement, à la différence de `landing-page`.
@@ -452,7 +441,6 @@ Via le pipeline **monkey** (cf. `../CLAUDE.md`). Particularité : ici le build e
 | Créer repo `my-monkeys/blog` | GitHub | vide, public ou privé |
 | Créer GitHub OAuth App | GitHub settings | callback : `https://decap-oauth.my-monkey.fr/callback` |
 | Déployer Worker OAuth | Cloudflare | voir `oauth/` README (`wrangler login`, `wrangler secret put GITHUB_CLIENT_ID`, `wrangler secret put GITHUB_CLIENT_SECRET`, `wrangler deploy`, ajouter custom domain `decap-oauth.my-monkey.fr`) |
-| Créer `BOT_PAT` | GitHub user settings → tokens | scope `repo` + `workflow`. Ajouter comme secret du repo `blog`. |
 | Ajouter sous-domaine `blog.my-monkey.fr` | cPanel O2switch | addon domain pointant sur dossier `blog.my-monkey.fr/` |
 | Push initial | local | `git remote add origin git@github.com:my-monkeys/blog.git && git push -u origin main` → trigger first deploy |
 
