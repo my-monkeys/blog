@@ -15,6 +15,7 @@ export const PROJECTS: readonly Project[] = [
   { slug: 'clique-salope', name: 'Clique Salope', url: 'https://clique-salope.my-monkey.fr' },
   { slug: 'controller', name: 'Controller', url: 'https://controller.my-monkey.fr' },
   { slug: 'fapmap', name: 'Fapmap', url: 'https://fapmap.my-monkey.fr' },
+  { slug: 'games-platform', name: 'Games Platform', url: 'https://games.my-monkey.fr' },
   { slug: 'geography', name: 'Geography', url: 'https://geography.my-monkey.fr' },
   { slug: 'kebab-shit-map', name: 'Kebab Shit Map', url: 'https://kebab.my-monkey.fr' },
   { slug: 'landing-page', name: 'Landing My-Monkey', url: 'https://my-monkey.fr' },

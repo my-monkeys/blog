@@ -1,0 +1,218 @@
+---
+title: "Un Durable Object par partie : sortir mes rooms multijoueur de Supabase Realtime"
+date: 2026-06-21
+type: article
+excerpt: "La déco détectée en 20 s, le tick du jeu tiré par le client, les scores perdus : ce n'étaient pas des bugs, c'était l'architecture. Comment j'ai sorti la couche temps réel de mes parties multijoueur vers un Durable Object Cloudflare — un mini-serveur par partie."
+tags: ["cloudflare", "durable-objects", "websockets", "realtime", "multiplayer", "supabase", "architecture"]
+project: "games-platform"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+
+Mon hub de mini-jeux a un mode multijoueur : tu crées une room, des potes rejoignent avec un code, et on enchaîne des manches en temps réel. Pendant des mois, ça a marché « presque ». Quelqu'un ferme son onglet, son avatar reste affiché vingt secondes. Le chrono d'une manche saute d'une seconde et demie d'un coup. Un score se perd quand le réseau hoquette. À chaque fois, je rajoutais un pansement : un beacon de présence ici, une période de grâce là, un `last_seen` qu'on rafraîchit en boucle.
+
+Un jour j'ai arrêté de coller des pansements et j'ai regardé la plaie. Tous ces bugs avaient la **même cause**, et ce n'était pas du code maladroit. C'était l'architecture : je faisais tourner un jeu temps réel **sans serveur temps réel**. La sortie a été de poser la couche room sur un **Durable Object Cloudflare** — un petit serveur par partie. Récit.
+
+---
+
+## Une base de données déguisée en serveur de jeu
+
+L'ancien modèle tenait sur Supabase Realtime. L'état d'une room — phase en cours, manche, scores, joueurs — vivait dans une colonne JSONB de Postgres (`gp_rooms.state`). Une vingtaine de routes API mutaient cette ligne, et les clients se synchronisaient via `postgres_changes` et des messages `broadcast`. C'est malin, ça marche pour beaucoup de choses, et **il n'y a aucun process serveur qui tient l'état de la partie en vie**.
+
+C'est précisément cette absence qui causait tout. Voici le tableau des douleurs, et leur cause :
+
+| Symptôme | Cause architecturale |
+|---|---|
+| Déco détectée en ~20 s | Personne ne « voit » la socket mourir ; on attend le timeout de heartbeat de Supabase |
+| Tick du jeu à 1226 ms | Le worker Passenger à froid repayait le coût TLS vers Supabase à chaque requête |
+| Le tick est tiré par le **client** | Aucun process pour faire tourner une vraie boucle (`setInterval`) côté serveur |
+| Score à 0 | POST best-effort qui disparaît sur une connexion lente |
+| Présence en beacon + grâce | Un hack pour *deviner* qui est encore connecté |
+
+Le point important : ce ne sont pas cinq bugs, c'est **un seul**, décliné cinq fois. Sans process serveur stateful, la détection de déco *doit* passer par un monitoring externe ; la boucle de jeu *ne peut être* que côté client ; les scores *sont* du fire-and-forget. Chaque comportement « instantané » qu'on veut devient un contournement. Le modèle « base de données comme bus de messages + serverless » avait atteint son plafond.
+
+Ce qu'il me fallait, c'était la pièce manquante : un endroit, vivant, qui *est* la partie.
+
+## L'idée : un petit serveur par partie
+
+Un **Durable Object** (DO), c'est exactement ça. Sur Cloudflare, c'est une instance unique, adressable par un nom (ici l'id de la room), qui garde son état **en mémoire** entre les requêtes, dispose de son propre stockage durable, et peut **programmer des alarmes**. Une room = un objet. Deux joueurs qui rejoignent la même room tapent la même instance ; deux rooms différentes vivent dans deux objets isolés.
+
+Le partage des responsabilités devient net :
+
+<Mermaid
+  caption="Le DO est la source de vérité du temps réel ; Supabase ne garde que le froid."
+  code={`
+flowchart LR
+  C["Onglets joueurs (WebSocket)"] -->|key + token| W["Worker : onBeforeConnect (auth JWT)"]
+  W -->|upgrade| DO["Durable Object GameRoom (1 par partie)"]
+  DO -->|etat vivant| MEM["state, players, scores en memoire"]
+  DO -->|put / alarm| ST["DO storage (survit a l'hibernation)"]
+  DO -->|demarrage + fin de manche| SB["Supabase : discovery, resultats, XP"]
+  DO -->|broadcast| C
+`}
+/>
+
+Le DO fait autorité sur l'état vivant. Supabase garde l'auth, une ligne de *discovery* dans `gp_rooms` (pour l'unicité du code de room), et la persistance de fin de manche. Le reste — scores en cours, clé de réponses du quiz — ne vit que dans le DO.
+
+<Callout type="info" label="Le coût">
+Le Worker ne porte **que** la couche temps réel des rooms ; le reste de la galaxie (sites, API, données) reste sur mon serveur et sur Supabase. Côté facture : à l'échelle de My-Monkey — quelques joueurs en simultané, un DO actif uniquement le temps d'une partie — ça tient confortablement dans le free tier de Cloudflare. C'est gratuit. Et techniquement, c'est l'outil juste : un Worker *stateless* ne suffisait pas, c'est justement la partie *stateful* (le DO) dont j'avais besoin.
+</Callout>
+
+## Les trois choses que seul un serveur stateful permet
+
+### 1. La déco instantanée
+
+Avec un DO, plus de heartbeat à attendre : la fermeture d'une socket déclenche `onClose` **tout de suite**. L'état du WebSocket *est* la vérité.
+
+```ts
+onClose(conn) {
+  const key = conn.state.playerKey
+  this.broadcastPresence()                          // tout le monde le voit, maintenant
+  if (!this.onlineKeys(conn.id).has(key))           // plus aucun onglet de ce joueur
+    this.awayGrace.set(key, Date.now() + AWAY_GRACE_MS) // 10 s de grâce
+  void this.persistGame()
+}
+```
+
+La période de grâce (`AWAY_GRACE_MS = 10_000`) absorbe le cas le plus courant : un **refresh**, qui ferme puis rouvre la socket en une fraction de seconde. Si le joueur ne revient pas dans les dix secondes, une alarme le retire du roster. Plus de beacon, plus de `last_seen`, plus de devinette.
+
+### 2. La boucle de jeu côté serveur
+
+Avant, chaque client appelait une route `tick` pour faire avancer le temps. Vingt clients, vingt horloges, vingt latences — et un chrono qui sautait. Maintenant le DO **programme sa propre alarme** sur la deadline de la phase en cours (fin du compte à rebours, fin du « playing », révélation d'une question de quiz…). Quand l'alarme sonne, le DO avance la machine à états, lui-même, une seule fois.
+
+```ts
+async rescheduleAlarm() {
+  const deadline = this.phaseDeadline()              // fin de countdown / playing / results…
+  const graces = [...this.awayGrace.values()]
+  const candidates = [deadline, ...graces].filter((x) => x != null)
+  if (!candidates.length) return this.ctx.storage.deleteAlarm()
+  const soonest = Math.min(...candidates)
+  await this.ctx.storage.setAlarm(Math.max(soonest + 250, Date.now() + 200))
+}
+```
+
+Le petit `+250 ms` garantit que l'horloge du serveur a bien dépassé la deadline avant que l'alarme tire. Une seule horloge fait foi pour toute la room, et l'alarme est durable : elle survit même à une éviction de l'objet. Fini les ticks perdus sur un blip réseau.
+
+### 3. Des scores qui ne mentent plus
+
+Le score n'est plus un POST envoyé dans le vide : la soumission est **validée dans le DO**, avec exactement le même code que celui qui dessine le jeu côté client. Ce qui amène le vrai casse-tête technique.
+
+## Faire tourner mon code de jeu dans workerd (sans React)
+
+Je voulais que le DO valide un score avec la *même* fonction `validate()` que l'app. Sauf que le runtime des Workers (workerd, un isolate V8) **refuse** d'exécuter du code qui importe `next/navigation`, React, du canvas ou GSAP. Or le composant `Play.tsx` de chaque jeu — marqué `'use client'` — traîne tout ça dans son sillage. Inclure `Play` dans le bundle du Worker, et l'objet crashe au chargement.
+
+La solution : couper chaque jeu en deux surfaces. Une partie **pure** (la logique serveur), et l'assemblage React par-dessus.
+
+```ts
+// src/games/motlong/server.ts — pur, zéro dépendance client
+const motlong: GameServer = {
+  meta: { id: 'motlong', modes: ['daily', 'solo', 'room'] /* … */ },
+  prepareClient(seed) { /* … */ },
+  validate(seed, submission) { /* … */ }, // c'est CE validate qui fait foi dans le DO
+  reveal(seed, submission) { /* … */ },
+}
+export default motlong
+
+// src/games/motlong/index.ts — le module complet, côté app
+const motlong: GameModule = { ...server, Play }
+export default motlong
+```
+
+Le DO importe un registre dédié qui ne tire **que** les `server.ts` :
+
+```ts
+// rooms-worker/src/registry.worker.ts
+// Le Durable Object importe CECI, jamais @/games/register : `Play` est un composant
+// 'use client' qui ferait entrer next/navigation, canvas et GSAP dans le bundle workerd.
+import motlong from '@/games/motlong/server'
+import sudoku  from '@/games/sudoku/server'
+// … 40 jeux, surface serveur uniquement
+```
+
+Le piège, c'est qu'un jeu ajouté à l'app mais **oublié** dans le registre worker ne plante pas : il score juste 0, en silence. D'où un test tout bête mais salvateur — il compte les jeux, et casse le build dès qu'il y a un écart :
+
+```ts
+it('charge tous les jeux room sans dépendance client', () => {
+  expect(roomGameIds().length).toBe(41) // 40 jeux + le quiz synthétique
+})
+```
+
+Bonus inattendu de cette découpe : la logique pure vit au même endroit, testée une fois, exécutée des deux côtés. L'anti-triche serveur n'est plus une réécriture parallèle qui dérive — c'est littéralement le code du jeu.
+
+## Le raté : l'hibernation qui remettait tout le monde à zéro
+
+Un DO peut **hiberner** : quand il est inactif, Cloudflare l'évince de la mémoire pour ne pas facturer du temps mort. Son `ctx.storage` survit ; à la prochaine connexion, `onStart` le réveille et reconstruit l'état. C'est gratuit en perf et ça baisse la facture. J'avais activé `hibernate: true` sans trop y penser.
+
+Sauf que je persistais `state` et `players`… mais **pas** les `Map` scopées à la manche en cours : `roundScores`, `roundPlacements`, la clé du quiz, les réponses. Tout ce qui n'était pas écrit dans le storage n'existait qu'en mémoire vive.
+
+Le résultat, déterré par un code-review, était savoureux dans le mauvais sens. Une hibernation en pleine manche, et :
+
+- `finalizeRound` reclassait tout le monde **à 0** (il itère sur `roundScores`, désormais vide) ;
+- un quiz **deadlockait** (la clé de réponses était perdue, plus rien ne validait) ;
+- pire, un *retry* d'une persistance ratée **écrasait les bons scores avec des zéros**.
+
+Le correctif : tout persister, à chaque mutation, et tout restaurer au réveil. Avec un piège de sérialisation — `JSON.stringify` ne sait pas encoder une `Map`, et encore moins une `Map` de `Map`. Il faut l'aplatir niveau par niveau, et faire le chemin inverse dans `onStart`.
+
+```ts
+async persistGame() {
+  // Map<round, Map<joueur, score>>  →  [round, [joueur, score][]][]
+  await this.ctx.storage.put('roundScores',
+    [...this.roundScores].map(([round, m]) => [round, [...m]]))
+  await this.ctx.storage.put('quizSecret', this.quizSecret) // jamais diffusée aux clients
+  await this.ctx.storage.put('players', [...this.players.entries()])
+  // … + placements, roundGames, quizAnswers, awayGrace
+}
+```
+
+Et un second bug se cachait sous le premier : ma petite couche d'accès à Supabase **avalait** les erreurs HTTP. Un `500` renvoyait un corps vide qu'on parsait tranquillement, et le code continuait comme si tout allait bien — d'où des pertes silencieuses qu'aucun `try/catch` ne pouvait rattraper.
+
+<CodeDiff
+  lang="ts"
+  beforeLabel="Avant : l'erreur HTTP est avalée"
+  afterLabel="Après : l'appelant peut décider de retry"
+  caption="rooms-worker/src/sb.ts"
+  before={`async select(table, query) {
+  const r = await fetch(url(table, query), { headers: this.h() })
+  return await r.json() // si r.status = 500, on parse "" et on continue
+}`}
+  after={`async select(table, query) {
+  const r = await fetch(url(table, query), { headers: this.h() })
+  if (!r.ok) throw new Error(\`sb select \${table} \${r.status}\`)
+  return await r.json()
+}`}
+/>
+
+<Callout type="fix" label="Hibernation">
+La règle, apprise à la dure : si un DO peut hiberner, **tout** état dont tu as besoin après un réveil doit vivre dans `ctx.storage`, pas seulement en mémoire. « En mémoire » est un cache, jamais la source de vérité. Un test qui simule l'éviction puis le réveil et vérifie que les scores reviennent non nuls vaut tous les raisonnements.
+</Callout>
+
+## Auth : le risque du code-review qui s'est réalisé
+
+À la revue, j'avais noté un risque : l'auth vérifiait les JWT Supabase en **HS256** (clé symétrique), et si le projet basculait un jour sur des clés de signature **asymétriques**, la vérification échouerait — en silence, indistinguable d'un mauvais secret. C'est exactement ce qui est arrivé.
+
+`auth.ts` vérifie désormais en **ES256** contre le JWKS public du projet, avec HS256 en repli pour les vieux jetons, et un garde anti-SSRF qui n'autorise que `*.supabase.co`. La vérification se fait sur le Worker, dans `onBeforeConnect`, **avant** même de toucher le DO :
+
+```ts
+// onBeforeConnect, sur le Worker
+const sub = token ? await verifySupabaseJwt(token, env) : null
+if (token && sub !== key) return new Response('bad token', { status: 401 })
+```
+
+L'identité d'un compte, c'est le `sub` du JWT vérifié : un client malveillant ne peut pas se faire passer pour l'`user.id` d'un autre. Les invités gardent leur clé `mm_anon` anonyme, acceptée telle quelle, comme avant. La leçon annexe : une vérification de signature qui **ignore le `alg` du header** échoue de façon muette — il faut traiter l'algorithme attendu comme une décision explicite, pas comme une donnée venue du jeton.
+
+## Ce qui reste dans Supabase
+
+Le DO est le chaud ; Supabase est le froid. Pendant une partie, les scores en cours et la clé du quiz ne touchent **jamais** la base. Supabase n'est écrit qu'aux jalons : à la fin de chaque manche, le DO persiste les résultats (`gp_room_results`), met à jour le `session_score`, attribue l'XP des comptes via la RPC `gp_award_xp`, et en fin de partie enregistre le graphe de qui-a-joué-avec-qui. Tout en upsert idempotent : rejouer une persistance n'abîme rien.
+
+Autrement dit, la base ne sert plus de bus de messages temps réel. Elle redevient ce qu'elle fait de mieux : un registre durable de ce qui est *acquis*.
+
+## Bilan
+
+Le déclic tient en une phrase : **une partie = un objet**. Le Durable Object était la primitive stateful qui manquait à un modèle « serverless + base de données » — un endroit vivant, adressable, qui détient l'état, fait tourner sa boucle, et voit les sockets naître et mourir en direct. La plupart de mes « bugs temps réel » n'étaient pas des bugs : c'étaient les symptômes de cette pièce absente.
+
+Ce que je garde sans hésiter : le découpage en logique pure partagée (testée une fois, exécutée des deux côtés), la boucle de jeu pilotée par une alarme durable, et le réflexe — chèrement acquis — que sur un objet qui peut être évincé à tout instant, la mémoire est un cache et le storage la vérité.
+
+Le multijoueur tourne sur [games.my-monkey.fr](https://games.my-monkey.fr). Va fermer un onglet en pleine partie : ton avatar s'éteint tout de suite.
