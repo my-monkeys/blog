@@ -8,7 +8,7 @@ on:
       - 'scripts/**'
       - 'astro.config.mjs'
       - 'package.json'
-      - 'package-lock.json'
+      - 'pnpm-lock.yaml'
       - '.monkey'
   workflow_dispatch:
 
@@ -20,12 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run build
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
       - name: Create tarball (top-level dir required by monkey)
         run: |
           mkdir -p /tmp/pack/blog
