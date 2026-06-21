@@ -37,11 +37,11 @@ oauth/                          # Cloudflare Worker OAuth (deploy séparé)
 ## Commandes
 
 ```bash
-npm install
-npm run dev              # http://localhost:4321
-npm run build            # → dist/ (Astro + Pagefind index + OG images)
-npm run preview
-npm test                 # Vitest (schemas, lib, registre projets)
+pnpm install
+pnpm dev                 # http://localhost:4321
+pnpm build               # → dist/ (Astro + Pagefind index + OG images)
+pnpm preview
+pnpm test                # Vitest (schemas, lib, registre projets)
 ```
 
 ## Variables d'environnement
@@ -65,7 +65,7 @@ Deux options, par ordre de praticité :
 1. **Decap CMS** (`blog.my-monkey.fr/admin`) — login GitHub → écrire → publish. Decap commit le `.mdx` dans `src/content/posts/`. Le webhook déclenche le rebuild.
 2. **Direct .mdx push** — éditer `src/content/posts/<slug>.mdx` localement, commit, push.
 
-Tous les posts avec `draft: true` sont visibles en dev (`npm run dev`) mais filtrés en prod et du RSS/sitemap.
+Tous les posts avec `draft: true` sont visibles en dev (`pnpm dev`) mais filtrés en prod et du RSS/sitemap.
 
 ## Types de posts
 
@@ -103,7 +103,7 @@ Tous les champs validés par Zod (`src/content/config.ts`). Le build casse si un
 | `cover` | ⛔ | chemin image | `./_assets/foo.jpg` (relatif au `.mdx`). Active le rendu Featured dans le feed. |
 | `url` | ✅ si type=`link` | URL | URL externe pour les liens partagés |
 | `source_url` | ⛔ | URL | Pour `update`, lien vers la release GitHub. Affiché en footer. |
-| `draft` | ⛔ | boolean (default `false`) | `true` = visible en `npm run dev` mais filtré en prod, RSS, sitemap |
+| `draft` | ⛔ | boolean (default `false`) | `true` = visible en `pnpm dev` mais filtré en prod, RSS, sitemap |
 
 ### 3. Templates prêts à copier-coller
 
@@ -405,7 +405,7 @@ Langues supportées : tout ce que Shiki supporte (>180 langues).
 draft: true
 ```
 
-→ Visible en `npm run dev`, **invisible** en prod (filtré du feed, des tags/archives, du RSS, du sitemap, l'URL directe renvoie 404).
+→ Visible en `pnpm dev`, **invisible** en prod (filtré du feed, des tags/archives, du RSS, du sitemap, l'URL directe renvoie 404).
 
 Workflow : push un brouillon, itère localement, passe à `draft: false` quand prêt.
 
@@ -418,7 +418,7 @@ cd /Users/maxim/Documents/my-monkey/blog
 # 1. créer l'article
 vim src/content/posts/mon-article.mdx
 # 2. tester en local
-npm run dev   # http://localhost:4321/posts/mon-article/
+pnpm dev   # http://localhost:4321/posts/mon-article/
 # 3. publier
 git add src/content/posts/mon-article.mdx
 git commit -m "post: mon article"
