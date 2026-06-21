@@ -1,0 +1,182 @@
+---
+title: "Minecraft est passé au rendu GPU différé : réécrire mon dumper d'icônes pour la 26.1"
+date: 2026-06-21
+type: article
+excerpt: "Trois packs à importer, dont All the Mods 11 sur Minecraft 26.1.2 — qui a refait son pipeline GUI en rendu différé. Mon dumper, qui rendait dans une frame live, ne rendait soudain plus rien. Récit d'une réécriture, et d'un outil qui devient un dépôt à part."
+tags: ["minecraft", "modding", "neoforge", "rendering", "blaze3d", "tooling"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+
+J'ai déjà raconté ici comment je fais [rendre Minecraft à lui-même pour dumper 30 000 icônes](/posts/jei-dumper-faire-rendre-minecraft/), et comment j'ai [généralisé ce one-off en outil](/posts/du-script-jetable-a-loutil/). Depuis, j'ai importé trois nouveaux packs sur [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) : All the Mods 10, sa version skyblock, et **All the Mods 11**. Les deux premiers ont coulé tout seuls dans le pipeline existant. Le troisième tourne sur **Minecraft 26.1.2** — et là, la méthode a dû changer, parce que le jeu a changé sa façon de dessiner. Cet article, c'est ce qui a cassé, comment je l'ai réparé, et pourquoi l'outil a fini par quitter le repo du wiki.
+
+---
+
+## D'abord le workflow : un dépôt, une branche par version
+
+Avant de parler rendu, le changement le plus structurant n'est pas dans le code, il est dans l'**organisation**. Dans les posts précédents, le mod qui dumpe les icônes vivait *dans* `modpacks-wiki/`, sous `jei-dumper/`, à côté d'un script KubeJS qui sortait les recettes. C'était pratique tant qu'il n'y avait qu'un pack et qu'une version de Minecraft.
+
+Le problème, c'est qu'un mod Minecraft est collé à une version du jeu — et pas qu'un peu. Entre 1.18 (Forge, Java 17) et 26.1 (NeoForge, Java 25), ce ne sont pas « quelques imports à ajuster » : c'est la couche de rendu, les mappings, le système de build, et la moitié des noms de classes qui bougent. Vouloir faire cohabiter tout ça dans un seul arbre source, c'est se mentir.
+
+Alors le dumper est devenu son **propre dépôt** : `ModPackExport`. Et sa structure copie celle d'`IconExporter` de Cyclops — **une branche par version de Minecraft** :
+
+<Mermaid
+  caption="ModPackExport : main porte le contrat, chaque branche porte une version du jeu"
+  code={`
+flowchart TD
+  M["main<br/>docs + CONTRACT.md<br/>(le contrat de sortie)"]
+  M -.-> A["forge-1.18<br/>StoneBlock 3"]
+  M -.-> B["neoforge-1.21<br/>SB4, ATM 10, Sky"]
+  M -.-> C["neoforge-26.1<br/>ATM 11"]
+  A --> OUT["item-icons/ · mob-icons/<br/>jei-layouts/ · recipes.json"]
+  B --> OUT
+  C --> OUT
+  OUT --> PY["pipeline Python<br/>(build_bank / translate / build_crafts)"]
+  PY --> WIKI["modpacks.my-monkey.fr"]
+`}
+/>
+
+La branche `main` ne contient aucun code de mod : juste la licence, le README, et surtout **`CONTRACT.md`** — le contrat de sortie. Tant que chaque branche écrit les mêmes familles de fichiers (`item-icons/`, `mob-icons/`, `jei-layouts/`, `recipes.json`), le pipeline Python en aval ne sait pas — et n'a pas à savoir — sur quelle version de Minecraft le mod a tourné. Le contrat est la frontière ; les branches sont des implémentations interchangeables derrière.
+
+Au passage, j'ai aussi **viré KubeJS**. Les recettes sortaient d'un script KubeJS, ce qui imposait d'avoir KubeJS installé dans l'instance et de raisonner en JavaScript-dans-le-jeu. Un `RecipeDumper` Java dans le mod fait la même chose, en une dépendance de moins au runtime et un langage de moins à jongler. Un mod à poser, des triggers à `touch`, c'est tout.
+
+<Callout type="fix" label="Leçon">
+Quand un outil est intrinsèquement couplé à un substrat versionné (un jeu, un runtime, une API qui casse en majeur), la branche-par-version n'est pas de la sur-ingénierie : c'est la forme honnête. Ce qui doit rester stable — le contrat de sortie — vit sur `main` ; ce qui bouge à chaque version vit sur sa branche. Le pipeline ne parle qu'au contrat.
+</Callout>
+
+## Ce qui a cassé : le GUI est devenu différé
+
+ATM 11 tourne sur Minecraft 26.1.2, qui est à la fois le « grand renommage » (`ResourceLocation` devient `Identifier`, les game rules déménagent…) et surtout un **nouveau pipeline GPU Blaze3D différé**. Le renommage, c'est mécanique : pénible, mais on suit le compilateur. Le rendu différé, lui, casse une **hypothèse de fond** de tout le post sur le JEI dumper.
+
+Rappel de l'ancienne technique : je rendais chaque item **dans une vraie frame**, à l'intérieur du `render()` d'un `Screen`. Je bindais un framebuffer offscreen, j'appelais `renderItem`, et je relisais immédiatement les pixels avec `downloadTexture`. Ça marchait parce qu'en mode immédiat, « dessiner » veut dire « écrire des pixels maintenant » : au retour de `renderItem`, l'image *est* dans le framebuffer.
+
+En 26.1.2, ce n'est plus vrai. Le GUI est **différé** : un appel de dessin ne dessine rien, il **extrait** une description de ce qu'il faudrait dessiner dans un `GuiRenderState`. Plus tard, un `GuiRenderer` unique *flushe* tout cet état d'un coup, contre le render target principal du jeu et les dimensions de la fenêtre. Conséquence directe : si je dessine puis relis les pixels dans le même appel, je relis un framebuffer **vide**. La description est bien là, en attente — mais personne ne l'a encore exécutée.
+
+<Mermaid
+  caption="Immédiat (avant) vs différé (26.1) : le dessin et l'exécution sont désormais séparés"
+  code={`
+flowchart LR
+  subgraph OLD["Avant — immédiat"]
+    R1["renderItem()"] --> P1["pixels écrits<br/>tout de suite"]
+    P1 --> D1["downloadTexture()<br/>✓ image"]
+  end
+  subgraph NEW["26.1 — différé"]
+    R2["fakeItem()"] --> E2["extrait dans<br/>GuiRenderState"]
+    E2 -.->|plus tard| F2["GuiRenderer.render()<br/>flushe l'état"]
+    F2 --> T2["→ mainRenderTarget"]
+  end
+`}
+/>
+
+Autrement dit : la prémisse même de l'article précédent — « rends dans la frame, relis tout de suite » — n'existe plus sur la dernière version du jeu.
+
+## OffscreenGui : emprunter le moteur, pas le réimplémenter
+
+Premier réflexe : reconstruire mon propre `GuiRenderer` et mon propre `GuiRenderState`, isolés, que je flushe quand je veux. Mauvaise piste. Le `GuiRenderer` du jeu embarque des enregistrements que NeoForge greffe dessus (les *picture-in-picture* renderers, par exemple) que je ne peux pas reconstituer à la main. Le réimplémenter, c'est repartir d'une copie qui sera fausse ou incomplète.
+
+La bascule mentale, c'est la même que pour le JEI dumper d'origine : **n'essaie pas de refaire le moteur, emprunte-le**. Je réutilise le `GuiRenderer` et le `GuiRenderState` *déjà construits* par le jeu. Le seul souci, c'est qu'ils sont câblés en dur sur le render target principal et les dimensions de la fenêtre. Donc, le temps d'un dessin, je **redirige ces deux globales** :
+
+- `Minecraft.mainRenderTarget` — pas de setter, je le réécris par réflexion vers mon target offscreen ;
+- `windowRenderState.{width, height, guiScale}` — public, je le mute en place puis je restaure.
+
+Et je rends la relecture **synchrone** avec mon propre `GpuFence` : je copie la texture vers un buffer, j'attends la complétion de la copie GPU, puis je lis les pixels (en gardant l'alpha, avec le flip vertical intégré). Le tout ne tourne plus dans un `Screen` mais **à chaque tick client**, hors de la passe GUI principale.
+
+<CodeDiff
+  lang="java"
+  beforeLabel="Avant (1.21) — rendre dans la frame"
+  afterLabel="Après (26.1) — rediriger le moteur différé"
+  caption="Le cœur du changement : on ne dessine plus soi-même, on détourne le GuiRenderer du jeu"
+  before={`// dans Screen.render(), frame live, mode immédiat
+target.bindWrite(true);
+RenderSystem.setProjectionMatrix(ortho, ORTHOGRAPHIC_Z);
+GuiGraphics g = new GuiGraphics(mc, buffers);
+g.pose().scale(8, 8, 1f);
+g.renderItem(stack, 0, 0);
+g.flush();                       // pixels écrits maintenant
+out.downloadTexture(0, false);   // ✓ relecture immédiate`}
+  after={`// à chaque tick, hors passe GUI — on EMPRUNTE le moteur
+GuiRenderState st = mc.gameRenderer.getGameRenderState().guiRenderState;
+GuiRenderer r = /* reflection */ guiRendererOf(mc.gameRenderer);
+st.reset();
+GuiGraphicsExtractor gfx = new GuiGraphicsExtractor(mc, st, -1, -1);
+draw.accept(gfx);                // n'écrit rien : EXTRAIT l'état
+// redirige les globales que le GuiRenderer lit, le temps d'un flush :
+set(MC_MAIN_RENDER_TARGET, mc, target);   // réflexion, pas de setter
+window.width = w; window.height = h; window.guiScale = 1;
+r.render(fogBuffer());           // le vrai pipeline différé → mon target
+// GpuFence : on attend la copie GPU avant de lire les pixels`}
+/>
+
+C'est plus indirect que l'ancien code, et c'est assumé : je ne contrôle plus le tracé, je contrôle *où* le tracé du jeu atterrit. En échange, j'hérite de tout le pipeline réel — donc d'un rendu fidèle, exactement comme l'inventaire le ferait.
+
+<Callout type="info">
+Le même principe rejaillit partout. Les fluides, par exemple : le `FluidTankRenderer` de JEI ressort **blanc** à travers le pipeline différé (il enveloppe son tracé dans un blit tuilé sous un *scissor*, qui se perd offscreen). Je rends donc les fluides directement, via le sprite de leur modèle d'état fluide — d'autant que 26.1.2 a supprimé les vieux accesseurs de texture de fluide. Un de plus à reporter, mais le geste est le même : trouver le chemin de dessin qui survit au différé.
+</Callout>
+
+## La guerre de l'aspect ratio : le guiScale cuit dans l'extrait
+
+Le moteur emprunté rendait. Sauf que les items sortaient **compressés d'environ moitié sur l'axe horizontal** — un coffre carré devenait un coffre maigre. Et le détail rageant : les **mobs**, eux, sortaient parfaits.
+
+La cause tient au fait que l'extrait différé **cuit le `guiScale` de l'hôte** dans sa description. Sur cookie-server, le `guiScale` vaut 2. Le contenu dessiné se retrouve donc plafonné à ~`cible / guiScale` pixels, ancré en haut à gauche — et, pour le chemin d'atlas d'items (`fakeItem`, `blitSprite`), écrasé d'un facteur ~2 sur X. Les turntables de mobs passent par un autre chemin (`gfx.entity`, avec ses quaternions), insensible à ce biais : voilà pourquoi les mobs étaient nickel et les items étirés.
+
+J'ai tenté de défaire ça **côté replay** par tous les angles — rediriger `windowRenderState.width`, `.height`, `.guiScale`, forcer `guiScale = 1`, extraire avant ou après la redirection. Rien. La déformation est *à l'intérieur* de la projection d'atlas d'items du jeu ; au moment du tracé, tout est carré côté diagnostic. Impossible à annuler proprement là où je suis.
+
+Donc je l'ai réparée **au premier étage que je contrôle vraiment** : le pipeline Python. Je rends plus grand, puis je **dé-squishe l'axe X** en une seule passe LANCZOS lisse (`build_bank --unsquish-x <f>`, qui dé-squishe *et* recadre d'un coup). Sauf que ce facteur réserve deux pièges que j'ai appris à la dure :
+
+1. **Il dépend de la taille de rendu.** Plus je rends grand, moins c'est compressé : ~2,0× à 256 px de rendu, ~1,4× à 512. Pas une constante — une courbe.
+2. **L'extent vertical, lui, suit la taille de rendu, alors que `pose.scale` n'agit que sur X.** Donc plus je monte en résolution pour gagner du détail horizontal, plus les blocs « cube plein » remplissent verticalement la frame — et finissent par **se faire couper** en haut et en bas au-delà de ~448 px.
+
+J'ai donc fait du va-et-vient : 256 px laissait les meubles trop flous, 512 px coupait les blocs. Le réglage qui tient, c'est **rendre à 320 px** puis dé-squisher avec un facteur calé sur cette taille, vers une bank finale à 128 px. À 320, j'ai ~1,5× le détail horizontal du 256, et les blocs les plus hauts gardent ~36 px de marge avant le bord.
+
+<Callout type="warn">
+Quand une distorsion est inajustable à la source, on la corrige au premier étage qu'on maîtrise — mais on **mesure**, parce qu'elle n'est pas constante. J'ai cru tenir un facteur de dé-squish unique ; il variait avec la résolution de rendu, et la contrainte verticale tirait dans le sens inverse de celle que je voulais relâcher. Le bon réglage n'est pas un nombre, c'est un compromis entre deux courbes.
+</Callout>
+
+## Côté wiki : un pack qui n'a pas de quêtes
+
+Le rendu réparé, restait un trou côté site. Le tout premier post de cette série rendait l'**arbre de quêtes FTB Quests** — c'était *la* vue d'entrée du wiki. Implicitement, j'avais supposé que tout modpack a un quest book.
+
+ATM 11 a démarré **avant que FTB Quests ne soit porté en 26.1**. Pas de quest book du tout. Pas « un arbre vide » — l'absence totale de la source. Le wiki devait apprendre à vivre sans sa vue historique.
+
+La correction est restée fidèle à la thèse de l'article sur la généralisation : **piloter par la donnée, ne pas toucher l'outil**. Chaque pack déclare désormais ses vues dans son entrée d'index, et l'app sonde l'asset des quêtes au chargement ; s'il renvoie un 404, l'onglet Quêtes n'apparaît tout simplement pas.
+
+```tsx
+// ATM 11 a démarré avant le portage de FTBQuests en 26.1 → pas de quests/data.json.
+// On sonde, et on cache l'onglet là où il n'y a rien à montrer.
+const [hasQuests, setHasQuests] = useState(false);
+useEffect(() => {
+  fetchAsset(assetRootUrl() + "quests/data.json")
+    .then((d) => setHasQuests(Boolean(d?.chapters)));
+}, [pack]);
+
+// …plus bas, l'onglet n'est rendu que si la donnée existe :
+{hasQuests && <button onClick={() => setView("quests")}>Quêtes</button>}
+```
+
+Dans le même esprit data-driven, l'onglet d'élevage qui n'affichait que les **poules** s'est généralisé aux **abeilles** : ATM 11 embarque Productive Bees, et la même vue (un graphe parent + parent → enfant) sert les deux, pilotée par un simple drapeau de configuration du pack. Là encore, zéro ligne à toucher dans le générique — juste de la donnée déposée.
+
+<Callout type="fix" label="Leçon">
+Une supposition implicite (« tout pack a des quêtes ») ne se voit que le jour où un cas la viole. La bonne réponse n'était pas un `if pack == "atm11"` dans l'outil, c'était de rendre la présence d'une vue **dérivable de la donnée**. Le pack qui casse l'hypothèse est le meilleur test de la frontière outil/donnée.
+</Callout>
+
+## Les limites, honnêtement
+
+Comme d'habitude, je préfère lister les trous que prétendre à la magie :
+
+- **Pas encore de Mekanism ni de Create sur 26.1** — l'écosystème de mods rattrape la nouvelle version. ATM 11 est donc un peu plus « vanilla++ » que ses aînés, le temps que ces gros mods se portent. Rien à faire côté outil : c'est de la donnée qui arrivera.
+- **Le dé-squish X est une approximation calibrée, pas une vraie correction.** Je compense une déformation que je ne peux pas annuler à la source ; le facteur est calé empiriquement pour une taille de rendu donnée. Si un jour je trouve comment neutraliser la projection d'atlas côté mod, ça remplacera cette béquille.
+- **La redirection par réflexion de `mainRenderTarget` est fragile.** Elle repose sur le nom exact d'un champ privé du jeu. Un renommage dans une version future la casse net — mais c'est précisément le pari de la branche-par-version : ce code-là *a le droit* d'être fragile, parce qu'il est isolé sur sa branche et ne pollue pas les autres.
+
+## Conclusion
+
+La méthode a changé parce que le **substrat** a changé. Tant que Minecraft dessinait en mode immédiat, « rends dans la frame et relis » suffisait. Le jour où le jeu est passé au GPU différé, il a fallu cesser de dessiner moi-même pour **détourner son propre moteur de rendu** — réutiliser le `GuiRenderer`, rediriger deux globales, attendre un fence. Et accepter que la déformation d'atlas se règle un étage plus loin, dans le pipeline, faute de pouvoir la défaire à la source.
+
+Ce qui rend tout ça tenable, c'est la décision d'organisation prise *avant* d'écrire une ligne de la 26.1 : sortir le dumper dans son dépôt, une branche par version, un contrat de sortie stable sur `main`. La 26.1 a pu casser tout le rendu sans toucher à StoneBlock 3 ou aux ATM 10 — chacun sur sa branche, derrière le même contrat. Reporter un outil qui plonge dans les entrailles de rendu d'un jeu, c'est accepter que ces entrailles sont la chose la moins stable du jeu — et ranger son code en conséquence.
+
+Le [JEI dumper d'origine](/posts/jei-dumper-faire-rendre-minecraft/) reste valable pour tout ce qui est en 1.21 et avant ; pour la 26.1, c'est cette réécriture qui prend le relais. Et la [généralisation en outil](/posts/du-script-jetable-a-loutil/) a tenu sa promesse : trois packs de plus, dont un sur une version qui a tout chamboulé, et le wiki s'est plié sans que la frontière outil/donnée ne craque.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · cinq packs, dont All the Mods 11 sur Minecraft 26.1.2.*
