@@ -1,0 +1,268 @@
+---
+// Interactive turntable scrubber. Each sprite sheet is a horizontal row of 12 frames
+// (1536×128 = 12 × 128px), exactly as the wiki ships them. Drag to rotate, or let it
+// auto-spin. Demonstrates how a "rotating 3D mob" is really 12 flat frames windowed
+// one at a time — the same translate-window trick the live wiki uses.
+export interface Props {
+  caption?: string;
+  base?: string;
+  mobs?: { id: string; label: string }[];
+  start?: string;
+}
+const {
+  caption,
+  base = '/demos/mobs',
+  start = 'guardian',
+  mobs = [
+    { id: 'guardian', label: 'Guardian' },
+    { id: 'creeper', label: 'Creeper' },
+    { id: 'cow', label: 'Cow' },
+    { id: 'ravager', label: 'Ravager' },
+    { id: 'enderman', label: 'Enderman' },
+    { id: 'warden', label: 'Warden' },
+    { id: 'chicken', label: 'Chicken' },
+  ],
+} = Astro.props;
+---
+
+<figure class="mtt" data-mtt data-base={base} data-start={start}>
+  <div class="mtt-row">
+    <div class="mtt-stage" data-mtt-stage role="img" aria-label="Turntable d'un mob, glisser pour le faire tourner" tabindex="0">
+      <img class="mtt-img" data-mtt-img src={`${base}/${start}.png`} alt="" draggable="false" />
+      <span class="mtt-grab">↔ glisser</span>
+      <span class="mtt-angle" data-mtt-angle>60°</span>
+    </div>
+    <div class="mtt-side">
+      <div class="mtt-readout">
+        <span class="mtt-frame" data-mtt-fnum>03</span><span class="mtt-tot">/12</span>
+        <small>frame · pas de 30°</small>
+      </div>
+      <button class="mtt-spin" data-mtt-spin type="button" aria-pressed="true">⏸ spin</button>
+      <input class="mtt-range" type="range" min="0" max="11" step="1" value="2" data-mtt-range aria-label="Angle du turntable" />
+      <div class="mtt-mobs" data-mtt-mobs>
+        {mobs.map((m) => (
+          <button type="button" class="mtt-mob" data-mtt-mob={m.id} aria-pressed={m.id === start ? 'true' : 'false'}>{m.label}</button>
+        ))}
+      </div>
+    </div>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  const FRAMES = 12;
+
+  function initOne(root: HTMLElement) {
+    if (root.dataset.mttReady) return;
+    root.dataset.mttReady = '1';
+
+    const base = root.dataset.base || '/demos/mobs';
+    const stage = root.querySelector<HTMLElement>('[data-mtt-stage]')!;
+    const img = root.querySelector<HTMLImageElement>('[data-mtt-img]')!;
+    const angleEl = root.querySelector<HTMLElement>('[data-mtt-angle]')!;
+    const fnumEl = root.querySelector<HTMLElement>('[data-mtt-fnum]')!;
+    const spinBtn = root.querySelector<HTMLButtonElement>('[data-mtt-spin]')!;
+    const range = root.querySelector<HTMLInputElement>('[data-mtt-range]')!;
+    const mobBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-mtt-mob]'));
+
+    let frame = 2;
+    let cell = 220;
+    let spinning = true;
+    let timer = 0;
+
+    function layout() {
+      cell = stage.clientWidth || 220;
+      img.style.height = cell + 'px';
+      img.style.width = cell * FRAMES + 'px';
+      paint();
+    }
+
+    function paint() {
+      const f = ((frame % FRAMES) + FRAMES) % FRAMES;
+      img.style.transform = `translateX(${-f * cell}px)`;
+      angleEl.textContent = Math.round(f * 30) + '°';
+      fnumEl.textContent = String(f + 1).padStart(2, '0');
+      range.value = String(f);
+    }
+
+    function setFrame(f: number) {
+      frame = ((Math.round(f) % FRAMES) + FRAMES) % FRAMES;
+      paint();
+    }
+
+    function setSpin(on: boolean) {
+      spinning = on;
+      spinBtn.textContent = on ? '⏸ spin' : '▶ spin';
+      spinBtn.setAttribute('aria-pressed', String(on));
+      window.clearInterval(timer);
+      if (on) timer = window.setInterval(() => setFrame(frame + 1), 95);
+    }
+
+    function setMob(id: string) {
+      img.src = `${base}/${id}.png`;
+      for (const b of mobBtns) b.setAttribute('aria-pressed', String(b.dataset.mttMob === id));
+    }
+
+    // Drag to rotate. A full sweep across the stage ≈ one full turn.
+    let dragging = false;
+    let startX = 0;
+    let startFrame = 0;
+    stage.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      startX = e.clientX;
+      startFrame = frame;
+      setSpin(false);
+      stage.setPointerCapture(e.pointerId);
+      stage.classList.add('is-drag');
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const pxPerFrame = Math.max(12, cell / FRAMES);
+      setFrame(startFrame + (e.clientX - startX) / pxPerFrame);
+    });
+    const endDrag = () => {
+      dragging = false;
+      stage.classList.remove('is-drag');
+    };
+    stage.addEventListener('pointerup', endDrag);
+    stage.addEventListener('pointercancel', endDrag);
+    stage.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight') { setSpin(false); setFrame(frame + 1); e.preventDefault(); }
+      if (e.key === 'ArrowLeft') { setSpin(false); setFrame(frame - 1); e.preventDefault(); }
+    });
+
+    spinBtn.addEventListener('click', () => setSpin(!spinning));
+    range.addEventListener('input', () => { setSpin(false); setFrame(Number(range.value)); });
+    for (const b of mobBtns) b.addEventListener('click', () => setMob(b.dataset.mttMob!));
+
+    new ResizeObserver(layout).observe(stage);
+    if (img.complete) layout(); else img.addEventListener('load', layout, { once: true });
+    setSpin(true);
+  }
+
+  function initAll() {
+    document.querySelectorAll<HTMLElement>('[data-mtt]').forEach(initOne);
+  }
+
+  initAll();
+  document.addEventListener('astro:page-load', initAll);
+</script>
+
+<style>
+  .mtt {
+    margin: 2.2em 0;
+  }
+  .mtt-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    align-items: stretch;
+  }
+  .mtt-stage {
+    position: relative;
+    width: min(256px, 70vw);
+    aspect-ratio: 1;
+    flex: 0 0 auto;
+    overflow: hidden;
+    border: var(--border);
+    box-shadow: var(--shadow-hard);
+    /* Medium-neutral (theme-independent): mid-tone so BOTH a near-black mob
+       (enderman) and a near-white one (chicken) keep contrast, plus everything
+       between. A dark stage would swallow the enderman; a light one, the chicken. */
+    background: radial-gradient(circle at 50% 36%, #6d727a, #3c3f45);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+  .mtt-stage.is-drag { cursor: grabbing; }
+  .mtt-stage:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .mtt-img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    max-width: none; /* override the prose `img { max-width: 100% }` — the strip is 12× wide */
+    image-rendering: pixelated;
+    will-change: transform;
+    pointer-events: none;
+  }
+  .mtt-grab {
+    position: absolute;
+    left: 8px;
+    bottom: 7px;
+    font-family: var(--font-ui);
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    color: rgba(255, 255, 255, 0.62); /* stage is always dark slate */
+    pointer-events: none;
+  }
+  .mtt-angle {
+    position: absolute;
+    right: 8px;
+    top: 7px;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--bg);
+    border: 1.5px solid var(--ink);
+    padding: 1px 6px;
+    pointer-events: none;
+  }
+  .mtt-side {
+    flex: 1 1 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    justify-content: center;
+    min-width: 180px;
+  }
+  .mtt-readout {
+    font-family: var(--font-mono);
+    line-height: 1;
+  }
+  .mtt-frame { font-size: 2.4rem; font-weight: 700; color: var(--ink); }
+  .mtt-tot { font-size: 1.2rem; color: var(--ink-soft); }
+  .mtt-readout small {
+    display: block;
+    margin-top: 0.25rem;
+    font-family: var(--font-ui);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+  }
+  .mtt-spin {
+    align-self: flex-start;
+    font-family: var(--font-ui);
+    font-weight: 600;
+    font-size: 0.82rem;
+    padding: 0.35rem 0.8rem;
+    border: var(--border);
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .mtt-spin:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--ink); }
+  .mtt-range { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .mtt-mobs { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .mtt-mob {
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+    padding: 0.25rem 0.55rem;
+    border: 1.5px solid var(--ink);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .mtt-mob[aria-pressed='true'] {
+    background: var(--ink);
+    color: var(--bg);
+  }
+  .mtt figcaption {
+    margin-top: 0.75rem;
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    color: var(--ink-soft);
+  }
+</style>

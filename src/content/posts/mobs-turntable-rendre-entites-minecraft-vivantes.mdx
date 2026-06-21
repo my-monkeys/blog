@@ -1,0 +1,129 @@
+---
+title: "Faire tourner les mobs : rendre des entités Minecraft vivantes en turntables"
+date: 2026-06-21
+type: article
+excerpt: "Chaque mob du wiki tourne en vue 3/4. Pas un fichier de modèle, pas un screenshot : l'entité vivante, rendue par le jeu en 12 frames. Comment je la fais tourner, et comment je l'empêche de déborder de sa case — démos interactives à l'appui."
+tags: ["minecraft", "modding", "rendering", "neoforge", "blaze3d", "tooling"]
+project: "modpacks-wiki"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import MobTurntable from '@/components/MobTurntable.astro';
+import MobFraming from '@/components/MobFraming.astro';
+
+Sur [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr), quand tu survoles un mob, il **tourne** sur lui-même en vue trois-quarts. C'est le détail dont je suis le plus content, et c'est aussi le plus mal compris : ce n'est ni un modèle 3D chargé dans le navigateur, ni un screenshot. C'est l'**entité vivante**, rendue par le moteur du jeu en **12 frames** posées dans une seule image. Voici comment elle tourne, et comment je l'empêche de sortir de sa case — avec deux démos que tu peux manipuler.
+
+Tiens, commence par jouer avec. Glisse sur le mob pour le faire pivoter, change d'entité :
+
+<MobTurntable caption="Une « sheet » de turntable : 12 frames de 128 px côte à côte (1536 × 128). Le viewer n'en montre qu'une à la fois via une fenêtre qui se translate — glisse pour scruber les 30° par frame. Ce sont les vraies images servies par le wiki." />
+
+---
+
+## Pourquoi rendre l'entité vivante, pas son modèle
+
+L'approche évidente serait de lire le **fichier de modèle** du mob et de le réafficher. Sauf qu'il n'existe pas de format universel. Les entités vanilla ont leur modèle en dur dans le code ; GeckoLib en couvre une quinzaine de mods ; les autres sont éclatés entre formats maison. Vouloir parser « le » modèle, c'est signer pour un parser par mod, à vie.
+
+La bascule, c'est la même que pour [le rendu des icônes d'items](/posts/jei-dumper-faire-rendre-minecraft/) : **ne lis pas le modèle, demande au jeu de dessiner l'entité**. Le moteur sait déjà afficher n'importe quelle entité vivante — c'est exactement ce qu'il fait dans l'aperçu d'inventaire. Je spawn l'entité, je l'oriente, je capture. Vanilla, GeckoLib, format exotique : si le jeu sait l'afficher, je sais la capturer. Zéro code spécifique à un mod.
+
+## Le turntable : 12 frames et une rotation sur Y
+
+Un turntable, c'est conceptuellement simple : je fais tourner l'entité de 360° par pas de 30°, et je rends une frame à chaque pas. Douze frames, douze angles. Le viewer les rejoue en boucle, et tu obtiens une rotation fluide à partir de douze images plates — ce que la démo ci-dessus montre quand elle « spin ».
+
+Le cœur, c'est l'orientation. En MC 26.1, ça passe par trois quaternions composés :
+
+```java
+float bb = Math.max(entity.getBbHeight(), entity.getBbWidth());
+float scale = (F * fill) / Math.max(bb, 0.5f);
+EntityRenderState state = mc.getEntityRenderDispatcher().extractEntity(entity, 1.0f);
+
+// les entités GUI rendent à l'envers → flip Z ; bascule caméra ; spin Y
+Quaternionf pose = new Quaternionf().rotateZ((float) Math.PI);
+Quaternionf cameraOrbit = new Quaternionf().rotateX(TILT);   // 0.32 rad, vue 3/4
+pose.mul(cameraOrbit);
+pose.rotateY(angle);                                          // angle = frame × 30°
+
+return OffscreenGui.render(F, F, gfx ->
+    gfx.entity(state, scale, new Vector3f(0, 0, 0), pose, cameraOrbit, 0, 0, F, F));
+```
+
+<Mermaid
+  caption="Trois rotations composées : retourner, basculer, tourner — puis rendre via le pipeline GUI différé"
+  code={`
+flowchart LR
+  E["entité<br/>vivante"] --> X["extractEntity()"]
+  X --> S["EntityRenderState"]
+  Q1["rotateZ(π)<br/>flip vertical"] --> R["gfx.entity(state, scale,<br/>pose, cameraOrbit)"]
+  Q2["rotateX(0.32)<br/>bascule 3/4"] --> R
+  Q3["rotateY(θ)<br/>θ = frame × 30°"] --> R
+  S --> R
+  R --> O["OffscreenGui<br/>→ frame F×F"]
+`}
+/>
+
+Le `rotateZ(π)` n'est pas cosmétique : les entités rendues en contexte GUI sortent **à l'envers**, il faut les retourner. Le `rotateX(0.32)` donne la légère plongée qui fait la vue trois-quarts. Et le `rotateY(angle)` est la rotation du turntable proprement dite.
+
+<Callout type="info">
+Détail qui m'a coûté un moment : en 26.1, il faut la variante **quaternion** de `gfx.entity`, celle que `renderEntityInInventoryFollowsAngle` appelle en interne. La variante publique « suit la souris » plafonne le pivotement à ~24° — parfaite pour un aperçu d'inventaire qu'on incline du curseur, inutilisable pour un tour complet à 360°.
+</Callout>
+
+## Le vrai combat : empêcher le mob de déborder de sa case
+
+Voilà la partie qui a pris le plus de temps. Le rendu utilise une **échelle de caméra fixe**, mais les mobs n'ont pas tous la même taille — ni, surtout, la même *silhouette par rapport à leur hitbox*. Les piques d'un guardian, les tentacules d'un ghast, la masse d'un ravager **débordent** largement de la boîte de collision sur laquelle l'échelle est calée. Résultat brut : le mob touche les bords de la frame, et se fait **couper**.
+
+Pousse le curseur ci-dessous : tu montes le remplissage du rendu, et dès que le contenu atteint le bord, les côtés concernés passent au rouge — exactement la condition que le mod surveille.
+
+<MobFraming caption="Le contenu est mesuré (scan des pixels opaques, comme le fait le viewer). Tant qu'il déborde, la passe d'auto-fit réduit l'échelle de 40 % et recommence. Le guardian est le cas d'école : ses piques dépassent franchement sa hitbox." />
+
+La solution est un **auto-fit en deux passes** :
+
+<Mermaid
+  caption="Rendre, mesurer, rétrécir tant que ça déborde, puis recadrer l'union des 12 frames"
+  code={`
+flowchart TD
+  A["rendre les 12 frames<br/>à fill = 0.42"] --> B{"un bord<br/>touché ?"}
+  B -->|oui| C["fill ×= 0.6"]
+  C --> A
+  B -->|non| D["recadrer l'union des bbox<br/>à FIT_FILL = 0.86"]
+  D --> F["composer la sheet<br/>12 × 128 px"]
+`}
+/>
+
+Passe 1 : je rends les douze frames à un remplissage prudent (0.42 de la frame), et je mesure l'**union** des boîtes englobantes opaques sur toute la rotation. Si quoi que ce soit touche un bord, je multiplie le remplissage par 0,6 et je recommence — jusqu'à six fois, ce qui couvre un débordement d'environ ×26 (le guardian rentre vers la 3ᵉ tentative). Passe 2 : je recadre l'union sur un carré et je redescends à `OUT = 128 px`, en visant 86 % de la case. Tout mob finit donc visible en entier *et* à une taille visuelle homogène, quelle que soit la taille de son modèle.
+
+<Callout type="fix" label="Leçon">
+Le bug n'était pas dans le backend GL — j'ai mis du temps à l'admettre. Sur la version 1.18, j'ai enchaîné ~8 cycles headless : blanc → sliver → hors-cadre → à l'envers. La preuve qui a tout débloqué : une sortie **byte-identique cassée** sur GL logiciel (xvfb/llvmpipe) *et* matériel. Si les deux backends produisent le même pixel faux, le FBO n'est pas en cause — le bug est dans **ma transformation**. En l'occurrence, un `flipY()` copié-collé d'un autre chemin de rendu, qui inversait à la fois l'orientation *et* la convention de centrage. Quand deux environnements opposés cassent pareil, arrête de soupçonner l'environnement.
+</Callout>
+
+## Le même geste, trois moteurs de rendu
+
+Comme le dumper vit en [une branche par version de Minecraft](/posts/minecraft-rendu-differe-dumper-icones-26-1/), le turntable a trois implémentations — même idée, API à chaque fois différente :
+
+| Version | Appel de rendu | Retournement | Centrage |
+|---|---|---|---|
+| **Forge 1.18** | `PoseStack` direct + `EntityRenderDispatcher`, `yBodyRot` par frame | aucun (surtout pas de `flipY`) | `feetY = −(bbH·scale)/2` |
+| **NeoForge 1.21** | `InventoryScreen.renderEntityInInventory` + `GuiGraphics` | `flipY()` à la relecture | `feetY = F/2 + (bbH·scale)/2` |
+| **NeoForge 26.1** | `gfx.entity(quaternions)` via `OffscreenGui` (pipeline différé) | flip intégré au `pose` | recadrage par bbox |
+
+C'est la 26.1 qui a tout rebattu, parce que [le jeu est passé au rendu GPU différé](/posts/minecraft-rendu-differe-dumper-icones-26-1/) : je ne dessine plus dans une frame, j'extrais un `gfx.entity(...)` et je laisse le `GuiRenderer` du jeu le flusher dans mon target offscreen. La logique d'auto-fit, elle, se reporte telle quelle d'une version à l'autre — c'est de la géométrie, pas de l'API.
+
+## Une sheet pour plusieurs variantes
+
+Dernier piège, côté données cette fois. Les **tables de butin** sont souvent plus granulaires que les **types d'entité**. Aether II déclare des loots `kirrid/arctic/black` quand il n'existe qu'un type d'entité `arctic_kirrid` ; vanilla fait pareil avec `sheep/black`. Si je ne fais rien, j'obtiens une nuée d'œufs de spawn fantômes pour des variantes qui n'ont pas de sheet propre.
+
+Donc je **collapse** : un id de loot en chemin (`kirrid/arctic/black`) est rabattu sur la sheet d'entité dont l'ensemble de tokens est le plus grand sous-ensemble des tokens du chemin — ce qui gère même les réordonnancements (`arctic` + `kirrid` → `arctic_kirrid`) — et je fusionne les drops. Sur ATM 11, ça fait passer la liste de **258 à 172** mobs, et la moitié du bruit d'œufs de spawn disparaît.
+
+## Les limites, honnêtement
+
+- **Quelques dizaines d'entités ne rendent rien** : entités invisibles, marqueurs, projectiles « vivants » sans modèle affichable. Pour celles-là je retombe sur l'**œuf de spawn** correspondant, puis sur un glyphe. Personne ne cherche l'icône d'une entité-marqueur.
+- **De rares mobs à débordement extrême** restent rognés au-delà des six tentatives de rétrécissement (un effet de boss dont le visuel déborde de presque dix fois sa hitbox). Marginal, mais réel.
+- **L'échelle de caméra reste fixe au dump** : c'est pour ça que le viewer **remesure** chaque sheet côté client (le même scan de pixels que la démo) pour réharmoniser les tailles à l'affichage. Le mod cadre, le navigateur peaufine.
+
+## Conclusion
+
+Faire tourner un mob, au fond, c'est trois décisions : rendre l'**entité vivante** plutôt que son fichier de modèle (universel), la capturer en **douze frames** d'une rotation sur Y (un turntable, pas de la vraie 3D dans le navigateur), et lui garantir qu'**elle ne sortira jamais de sa case** par un auto-fit qui mesure et rétrécit jusqu'à ce que ça rentre. Le reste — quaternions, `flipY`, échelles — n'est que la traduction de ces trois idées dans l'API du moment, qui change à chaque version du jeu.
+
+Et puisque tout part du moteur du jeu lui-même, ça marche pour le prochain mob d'un prochain mod sans que j'aie une ligne à écrire pour lui. C'est exactement ce qu'on voulait d'un wiki qui se veut fidèle : pas une approximation dessinée à la main, la vraie créature, qui tourne.
+
+*Live : [modpacks.my-monkey.fr](https://modpacks.my-monkey.fr) · survole n'importe quel mob pour le voir tourner.*

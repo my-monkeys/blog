@@ -1,0 +1,254 @@
+---
+// Auto-fit / clip visualiser. Loads one turntable frame, measures its opaque content
+// bbox (the same alpha scan the wiki's mobMetrics does), and lets you push the render
+// "fill" up until the content spills the frame edge — turning the clipped sides red.
+// That's exactly the condition the mod's two-pass loop watches: render, measure, and if
+// anything touches an edge, shrink ×0.6 and retry (up to 6 times) before composing.
+export interface Props {
+  caption?: string;
+  base?: string;
+  start?: string;
+  mobs?: { id: string; label: string }[];
+}
+const {
+  caption,
+  base = '/demos/mobs',
+  start = 'guardian',
+  mobs = [
+    { id: 'guardian', label: 'Guardian' },
+    { id: 'ravager', label: 'Ravager' },
+    { id: 'warden', label: 'Warden' },
+    { id: 'cow', label: 'Cow' },
+    { id: 'chicken', label: 'Chicken' },
+  ],
+} = Astro.props;
+---
+
+<figure class="mfr" data-mfr data-base={base} data-start={start}>
+  <div class="mfr-row">
+    <canvas class="mfr-canvas" data-mfr-canvas width="256" height="256"></canvas>
+    <div class="mfr-side">
+      <div class="mfr-status" data-mfr-status>ajusté</div>
+      <label class="mfr-label">
+        remplissage du rendu <span class="mfr-val" data-mfr-val>0.86</span>
+        <input class="mfr-range" type="range" min="0.4" max="1.25" step="0.01" value="0.86" data-mfr-range aria-label="Remplissage du rendu" />
+      </label>
+      <p class="mfr-hint" data-mfr-hint>Le contenu tient dans la frame.</p>
+      <div class="mfr-mobs" data-mfr-mobs>
+        {mobs.map((m) => (
+          <button type="button" class="mfr-mob" data-mfr-mob={m.id} aria-pressed={m.id === start ? 'true' : 'false'}>{m.label}</button>
+        ))}
+      </div>
+    </div>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  const SRC = 128;        // source frame size (px)
+  const FRAME = 2;        // resting frame to measure/show
+  const ALPHA = 20;       // opaque threshold (matches mobMetrics)
+
+  type Box = { x0: number; y0: number; w: number; h: number; cx: number; cy: number; max: number };
+
+  function measure(img: HTMLImageElement): Box | null {
+    const c = document.createElement('canvas');
+    c.width = SRC; c.height = SRC;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, FRAME * SRC, 0, SRC, SRC, 0, 0, SRC, SRC);
+    let d: Uint8ClampedArray;
+    try { d = ctx.getImageData(0, 0, SRC, SRC).data; } catch { return null; }
+    let x0 = SRC, y0 = SRC, x1 = -1, y1 = -1;
+    for (let y = 0; y < SRC; y++)
+      for (let x = 0; x < SRC; x++)
+        if (d[(y * SRC + x) * 4 + 3] > ALPHA) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+    if (x1 < 0) return null;
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    return { x0, y0, w, h, cx: (x0 + x1 + 1) / 2, cy: (y0 + y1 + 1) / 2, max: Math.max(w, h) };
+  }
+
+  function initOne(root: HTMLElement) {
+    if (root.dataset.mfrReady) return;
+    root.dataset.mfrReady = '1';
+
+    const base = root.dataset.base || '/demos/mobs';
+    const canvas = root.querySelector<HTMLCanvasElement>('[data-mfr-canvas]')!;
+    const range = root.querySelector<HTMLInputElement>('[data-mfr-range]')!;
+    const valEl = root.querySelector<HTMLElement>('[data-mfr-val]')!;
+    const statusEl = root.querySelector<HTMLElement>('[data-mfr-status]')!;
+    const hintEl = root.querySelector<HTMLElement>('[data-mfr-hint]')!;
+    const mobBtns = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-mfr-mob]'));
+
+    const D = 256;          // CSS draw size
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = D * dpr; canvas.height = D * dpr;
+    canvas.style.width = D + 'px'; canvas.style.height = D + 'px';
+    const ctx = canvas.getContext('2d')!;
+    ctx.scale(dpr, dpr);
+
+    let img = new Image();
+    let box: Box | null = null;
+    let fill = 0.86;
+
+    function css(name: string) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, D, D);
+      if (!box) return;
+      const k = (fill * D) / box.max;                 // source-px → dest-px
+      const dx = D / 2 - box.cx * k;
+      const dy = D / 2 - box.cy * k;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, FRAME * SRC, 0, SRC, SRC, dx, dy, SRC * k, SRC * k);
+
+      // content bbox in dest coords
+      const bx = dx + box.x0 * k, by = dy + box.y0 * k, bw = box.w * k, bh = box.h * k;
+      const eps = 0.5;
+      const clipL = bx < -eps, clipT = by < -eps, clipR = bx + bw > D + eps, clipB = by + bh > D + eps;
+      const clipped = clipL || clipT || clipR || clipB;
+
+      // bbox outline
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = clipped ? (css('--alert') || '#FF5E78') : (css('--ok') || '#2ECC71');
+      ctx.setLineDash([5, 4]);
+      ctx.strokeRect(bx, by, bw, bh);
+      ctx.setLineDash([]);
+
+      // frame edges — light the clipped sides red
+      const edge = css('--alert') || '#FF5E78';
+      const calm = css('--ink-soft') || '#888';
+      ctx.lineWidth = 4;
+      const side = (on: boolean, x1: number, y1: number, x2: number, y2: number) => {
+        ctx.strokeStyle = on ? edge : calm;
+        ctx.globalAlpha = on ? 1 : 0.35;
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      };
+      side(clipT, 0, 2, D, 2);
+      side(clipB, 0, D - 2, D, D - 2);
+      side(clipL, 2, 0, 2, D);
+      side(clipR, D - 2, 0, D - 2, D);
+      ctx.globalAlpha = 1;
+
+      // status
+      statusEl.textContent = clipped ? '⚠ clip' : '✓ ajusté';
+      statusEl.dataset.clip = String(clipped);
+      hintEl.textContent = clipped
+        ? `Déborde → la passe suivante relance à ×0.6 (${(fill * 0.6).toFixed(2)}) jusqu'à rentrer.`
+        : 'Le contenu tient dans la frame.';
+    }
+
+    function setFill(v: number) {
+      fill = v;
+      valEl.textContent = v.toFixed(2);
+      range.value = String(v);
+      draw();
+    }
+
+    function setMob(id: string) {
+      const next = new Image();
+      next.onload = () => { img = next; box = measure(next); draw(); };
+      next.src = `${base}/${id}.png`;
+      for (const b of mobBtns) b.setAttribute('aria-pressed', String(b.dataset.mfrMob === id));
+    }
+
+    range.addEventListener('input', () => setFill(Number(range.value)));
+    for (const b of mobBtns) b.addEventListener('click', () => setMob(b.dataset.mfrMob!));
+
+    img.onload = () => { box = measure(img); draw(); };
+    img.src = `${base}/${root.dataset.start || 'guardian'}.png`;
+  }
+
+  function initAll() {
+    document.querySelectorAll<HTMLElement>('[data-mfr]').forEach(initOne);
+  }
+  initAll();
+  document.addEventListener('astro:page-load', initAll);
+</script>
+
+<style>
+  .mfr { margin: 2.2em 0; }
+  .mfr-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    align-items: stretch;
+  }
+  .mfr-canvas {
+    flex: 0 0 auto;
+    width: min(256px, 70vw);
+    height: auto;
+    aspect-ratio: 1;
+    border: var(--border);
+    box-shadow: var(--shadow-hard);
+    background:
+      repeating-conic-gradient(color-mix(in srgb, var(--ink) 7%, var(--bg-elev)) 0% 25%, var(--bg-elev) 0% 50%)
+      50% / 18px 18px;
+  }
+  :global([data-theme='dark']) .mfr-canvas {
+    background:
+      repeating-conic-gradient(#15151b 0% 25%, #0c0c10 0% 50%) 50% / 18px 18px;
+  }
+  .mfr-side {
+    flex: 1 1 200px;
+    min-width: 190px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    justify-content: center;
+  }
+  .mfr-status {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 1.5rem;
+    color: var(--ok);
+  }
+  .mfr-status[data-clip='true'] { color: var(--alert); }
+  .mfr-label {
+    font-family: var(--font-ui);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .mfr-val {
+    font-family: var(--font-mono);
+    font-size: 1rem;
+    color: var(--accent);
+    text-transform: none;
+  }
+  .mfr-range { width: 100%; accent-color: var(--accent); cursor: pointer; }
+  .mfr-hint {
+    margin: 0;
+    font-family: var(--font-body);
+    font-size: 0.92rem;
+    color: var(--ink-soft);
+    min-height: 2.6em;
+  }
+  .mfr-mobs { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+  .mfr-mob {
+    font-family: var(--font-ui);
+    font-size: 0.74rem;
+    padding: 0.25rem 0.55rem;
+    border: 1.5px solid var(--ink);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .mfr-mob[aria-pressed='true'] { background: var(--ink); color: var(--bg); }
+  .mfr figcaption {
+    margin-top: 0.75rem;
+    font-family: var(--font-ui);
+    font-size: 0.875rem;
+    color: var(--ink-soft);
+  }
+</style>
