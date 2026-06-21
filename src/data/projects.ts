@@ -29,6 +29,7 @@ export const PROJECTS: readonly Project[] = [
   { slug: 'piloo', name: 'Piloo', url: 'https://piloo.my-monkey.fr' },
   { slug: 'porndle-next', name: 'Porndle', url: 'https://porndle.my-monkey.fr' },
   { slug: 'showroom', name: 'Showroom', url: 'https://showroom.my-monkey.fr' },
+  { slug: 'snaaplt', name: 'Snaaplt', url: 'https://snaaplt.my-monkey.fr' },
   { slug: 'support', name: 'Support', url: 'https://support.my-monkey.fr' },
   { slug: 'traquenard', name: 'Traquenard', url: 'https://traquenard.my-monkey.fr' },
   { slug: 'uptime', name: 'Uptime', url: 'https://uptime.my-monkey.fr' },

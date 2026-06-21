@@ -1,0 +1,197 @@
+---
+title: "Une recherche hybride dans le navigateur — 120 Mo de transformer, zéro serveur"
+date: 2026-06-21
+type: article
+excerpt: "Retrouver un favori, c'est l'enfer : on se souvient de l'idée, pas du titre. J'ai mis une recherche hybride — mots-clés + sens — dans une extension Chrome. 120 Mo de transformer, de l'OCR, et zéro octet qui quitte la machine. Avec tout ce que MV3 m'a balancé."
+tags: ["chrome-extension", "transformers-js", "embeddings", "search", "local-first", "mv3"]
+project: "snaaplt"
+draft: false
+---
+
+import Callout from '@/components/Callout.astro';
+import Mermaid from '@/components/Mermaid.astro';
+import CodeDiff from '@/components/CodeDiff.astro';
+
+J'ai 3 000 favoris et je n'en retrouve aucun. Pas parce qu'ils ont disparu — parce que ma mémoire ne stocke pas des titres ni des URLs. Elle stocke des *idées* : « cet article sur les CTE récursives qui parlait de cycles », « le thread où quelqu'un expliquait pourquoi MV3 a tué les background pages ». Le titre exact ? Aucune idée. Le domaine ? Peut-être un blog, peut-être HN, peut-être un PDF.
+
+La recherche de favoris du navigateur, elle, ne connaît que le titre et l'URL. Si le mot que tu tapes n'y figure pas mot pour mot, tu ne trouves rien. C'est le pire des deux mondes : ça exige une précision que tu n'as pas, sur des métadonnées qui ne décrivent pas le contenu.
+
+Alors j'ai construit **Snaaplt** : une extension Chrome qui lit le *contenu* de chaque favori, l'indexe, et te laisse chercher par mots-clés **et** par sens. Le tout 100 % en local — parce que la liste de ce que quelqu'un met en favori, c'est intime, et que ça n'a aucune raison de partir sur un serveur.
+
+C'est l'histoire de comment on fait tenir tout ça — un transformer de 120 Mo compris — dans le bac à sable d'une extension Manifest V3.
+
+---
+
+## Pourquoi « hybride », et pas juste de la recherche sémantique
+
+La mode, c'est le « semantic search » : tu embeddes le contenu, tu embeddes la requête, tu compares les vecteurs. Magique pour « cet article sur les cycles dans un graphe ». Catastrophique pour « erreur EADDRINUSE » ou un nom propre : les embeddings lissent justement ce qui fait la spécificité d'un terme rare. Un modèle qui « comprend le sens » te ramène des trucs *sur le thème*, pas la page qui contient exactement ta chaîne.
+
+L'inverse — le bon vieux plein-texte — fait l'exact à la perfection et rate tout le reste. Tape « féliné » au lieu de « chat » et tu n'as rien.
+
+Donc les deux, en parallèle, fusionnés. Côté lexical, un index [MiniSearch](https://lucaong.github.io/minisearch/) avec préfixe et fuzzy, et un boost sur le titre :
+
+```ts
+const MS_OPTIONS = {
+  fields: ['title', 'urlText', 'text'],
+  storeFields: ['title', 'url'],
+  searchOptions: { prefix: true, fuzzy: 0.2, boost: { title: 3, urlText: 2 } },
+}
+```
+
+Côté sémantique, des embeddings et une similarité cosinus. Reste la vraie question : **comment marier deux listes de résultats dont les scores ne veulent rien dire ensemble ?** Un score MiniSearch et un cosinus vivent sur des échelles incomparables. Les normaliser, les pondérer, c'est partir dans les coefficients magiques à la main.
+
+La réponse tient en onze lignes et s'appelle **Reciprocal Rank Fusion**. On jette les scores, on ne garde que le *rang* dans chaque liste, et on additionne `1 / (k + rang)` :
+
+```ts
+const RRF_K = 60 // constante standard de Reciprocal Rank Fusion
+
+export function fuseRankings(rankings: string[][]): string[] {
+  const scores = new Map<string, number>()
+  for (const ranking of rankings) {
+    ranking.forEach((id, rank) => {
+      scores.set(id, (scores.get(id) ?? 0) + 1 / (RRF_K + rank + 1))
+    })
+  }
+  return [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id)
+}
+```
+
+Une page bien classée par les deux moteurs remonte fort. Une page que seul le lexical voit reste présente. Le `k = 60` amortit le poids des premières places pour qu'un seul moteur ne dicte pas tout. C'est l'algo qu'utilisent les vrais systèmes de retrieval, et il tient dans un coin d'écran. Aucun coefficient à régler.
+
+<Callout type="info" label="Le piège e5">
+Le modèle d'embeddings est de la famille **e5**, qui exige des préfixes : `query: ` devant une requête, `passage: ` devant un texte indexé. Ça paraît cosmétique — ça ne l'est pas. Sans les préfixes, la qualité s'effondre, parce que le modèle a été entraîné à distinguer les deux rôles. Une ligne oubliée et toute la recherche sémantique devient du bruit. Demande-moi comment je le sais.
+</Callout>
+
+## Trois mondes dans une extension
+
+Voilà où ça se complique. Une extension MV3, ce n'est pas une page web. C'est plusieurs contextes d'exécution aux règles différentes, et le calcul lourd n'a le droit de tourner dans aucun de ceux où on l'attendrait.
+
+<Mermaid
+  caption="Trois mondes : le service worker orchestre, l'offscreen calcule, IndexedDB se souvient."
+  code={`
+flowchart LR
+  UI["Popup / palette Cmd+Shift+K"] -->|requete| SW
+  BK["Favoris Chrome"] -->|nouveau favori| SW["Service worker (chef d'orchestre)"]
+  SW -->|EMBED / PARSE / OCR| OFF["Offscreen document (WASM)"]
+  OFF -->|transformers.js| M["e5-small q8 (~120 Mo)"]
+  OFF -->|pdf.js| PDF["Texte PDF"]
+  OFF -->|tesseract.js| OCR["OCR images / scans"]
+  SW -->|lecture / ecriture| DB["IndexedDB : pages, chunks, vecteurs, index"]
+  SW -->|MiniSearch + cosinus + RRF| UI
+`}
+/>
+
+Le **service worker** est le chef d'orchestre, mais il est éphémère : Chrome le tue dès qu'il est inactif. Il ne peut pas garder un modèle de 300 Mo en RAM, et il n'a pas de DOM pour parser du HTML. Le **content script** vit dans la page, donc côté isolation c'est non. Restait une option méconnue : l'**offscreen document**, une page invisible que l'extension crée à la demande pour exactement ce cas — du WASM, un `DOMParser`, du travail CPU long.
+
+C'est là que vit tout le gros calcul. Le service worker lui envoie des messages (`EMBED`, `PARSE_HTML`, `PARSE_PDF`, `OCR_IMAGE`) et récupère le résultat. L'offscreen garde le modèle chaud tant qu'on s'en sert, puis se ferme après cinq minutes d'inactivité pour rendre la RAM. Le cold start suivant coûte une à trois secondes — un compromis que j'assume largement.
+
+## Faire entrer 120 Mo de transformer dans le bac à sable
+
+Le modèle, c'est `Xenova/multilingual-e5-small`, quantizé en 8 bits (`q8`) : ~120 Mo à télécharger, ~300 Mo en mémoire, des vecteurs de 384 dimensions. Le faire tourner via [transformers.js](https://huggingface.co/docs/transformers.js) dans une extension, c'est une suite de petites guerres avec la CSP :
+
+```ts
+// Conformité Web Store : le runtime wasm est servi par l'extension, pas par un CDN.
+env.allowLocalModels = false
+const onnxWasm = env.backends.onnx.wasm
+onnxWasm.wasmPaths = chrome.runtime.getURL('wasm/')
+onnxWasm.numThreads = 1 // pas de SharedArrayBuffer sans cross-origin isolation
+```
+
+Trois contraintes empilées dans ces quelques lignes :
+
+- **Pas de code distant.** Le Web Store refuse les extensions qui chargent du JS/WASM depuis un CDN. Le runtime ONNX est donc bundlé *dans* l'extension et servi par `chrome.runtime.getURL`.
+- **`wasm-unsafe-eval`.** Charger du WASM compté comme de l'`eval` ; il faut whitelister explicitement dans la CSP du manifeste, sinon le moteur refuse de démarrer.
+- **Mono-thread.** ONNX adore le multi-thread via `SharedArrayBuffer`, qui exige le cross-origin isolation — indisponible dans ce contexte. Donc `numThreads = 1`, et on encaisse.
+
+Les poids du modèle, eux, sont téléchargés une fois et mis en cache par transformers.js. Après le premier chargement, plus rien ne sort sur le réseau pour la recherche.
+
+## Les ratés (la partie intéressante)
+
+Rien de ce qui précède n'a marché du premier coup. Trois bugs valent le détour.
+
+### Le timer d'inactivité qui tuait son propre téléchargement
+
+L'offscreen se ferme après cinq minutes sans message, pour libérer la RAM. Logique. Sauf que le **premier** téléchargement du modèle dure… plus de cinq minutes sur une connexion moyenne, et pendant ce temps personne n'envoie de message à l'offscreen. Résultat : la fenêtre se suicidait en plein download, encore et encore. Le téléchargement repartait de zéro à chaque relance.
+
+Le correctif : transformers.js émet une progression pendant le download. Il suffit de traiter chaque tick de progression comme une preuve de vie.
+
+<CodeDiff
+  lang="ts"
+  beforeLabel="Avant : l'offscreen se ferme pendant le download"
+  afterLabel="Après : chaque tick de progression réarme le timer"
+  caption="src/offscreen/main.ts — reportProgress"
+  before={`function reportProgress(p) {
+  chrome.runtime
+    .sendMessage({ type: 'MODEL_PROGRESS', ...p })
+    .catch(() => {})
+}`}
+  after={`function reportProgress(p) {
+  touchIdle() // le download du modèle (~120 Mo) émet ici :
+              // ne pas s'auto-fermer en plein telechargement
+  chrome.runtime
+    .sendMessage({ type: 'MODEL_PROGRESS', ...p })
+    .catch(() => {})
+}`}
+/>
+
+Une ligne. Mais une ligne qu'on ne trouve qu'en regardant *pourquoi* le download n'aboutit jamais, pas en relançant en espérant.
+
+### Les workers qui ne mouraient jamais
+
+L'indexation des PDF (pdf.js) et l'OCR (tesseract.js) créent chacun des Web Workers. Je les créais, je m'en servais, et… je les laissais là. À l'usage, l'offscreen accumulait des workers fantômes — environ 16 Mo de fuite à chaque PDF un peu costaud. Le fix tient en deux réflexes : `loadingTask.destroy()` pour pdf.js après extraction, et un reset du worker tesseract en cas d'erreur pour ne pas réutiliser un worker mort.
+
+### La course qui perdait des favoris
+
+Le service worker est tué et relancé sans prévenir. Or l'index MiniSearch doit être chargé depuis IndexedDB, muté (ajout d'une page), puis ré-écrit. Deux indexations qui se chevauchent, et la seconde écrasait la première : *lost update*, une page indexée puis silencieusement perdue. La solution classique : sérialiser ces écritures derrière un mutex (charger → muter → sauver, atomiquement) et ne retirer un favori de la file d'attente **qu'après** sa persistance confirmée. Si le worker meurt en plein vol, l'élément reste dans la file et sera repris.
+
+<Callout type="warn" label="Tesseract et la CSP">
+Petit bonus du même acabit : tesseract.js veut par défaut instancier son worker depuis une `blob:` URL — bloquée par la CSP d'extension. Il faut lui passer `workerBlobURL: false` pour qu'il utilise un constructeur `Worker` direct. Le genre de drapeau qu'on ne devine pas, qu'on déterre dans une issue GitHub à 23 h.
+</Callout>
+
+## Le pipeline complet, d'un favori à un résultat
+
+Mises bout à bout, les pièces donnent ça. Quand un favori arrive :
+
+1. **Extraction.** Si la page est ouverte, un content script en lit le DOM ; sinon on la `fetch` et on détecte le type (HTML, PDF, image) via le `Content-Type`. Le HTML passe par [Readability](https://github.com/mozilla/readability) pour ne garder que le contenu. Un PDF est lu par pdf.js ; si une page rend moins de 20 caractères (c'est un scan), on la rastérise et on l'OCR. Une image part directement à l'OCR.
+2. **Découpe.** Le texte est tronçonné en chunks de ~250 mots avec 50 mots de recouvrement, pour rester sous la fenêtre du modèle tout en gardant du contexte aux frontières.
+3. **Embeddings.** Les chunks partent à l'offscreen par lots de 8, préfixés `passage: `, et reviennent en `Float32Array` stockés dans IndexedDB à côté du texte.
+
+Au moment d'une requête, on lance les deux moteurs et on fusionne :
+
+```ts
+export function searchVector(chunks, queryVector, topK = 20) {
+  const bestByPage = new Map()
+  for (const chunk of chunks) {
+    if (!chunk.vector) continue
+    const score = cosineSimilarity(chunk.vector, queryVector)
+    const current = bestByPage.get(chunk.pageId)
+    if (!current || score > current.score) {
+      bestByPage.set(chunk.pageId, { pageId: chunk.pageId, chunkText: chunk.text, score })
+    }
+  }
+  return [...bestByPage.values()].sort((a, b) => b.score - a.score).slice(0, topK)
+}
+```
+
+Oui, c'est un cosinus en force brute sur tous les chunks, à chaque recherche. Pas d'index ANN, pas de HNSW, pas de quantization de vecteurs. À l'échelle d'une bibliothèque de favoris personnelle, c'est instantané et ça m'évite tout un étage de complexité. Le jour où quelqu'un aura 200 000 favoris, je m'en occuperai — pas avant. Le résultat lexical et le résultat vectoriel passent dans `fuseRankings`, et la liste finale s'affiche dans la palette `⌘⇧K`.
+
+## Le local n'est pas une contrainte, c'est le produit
+
+J'aurais pu tout faire côté serveur : un cron qui aspire les favoris, une vraie base vectorielle, un endpoint de recherche. Plus simple, à bien des égards. Mais ça voudrait dire envoyer la liste de tout ce que quelqu'un trouve assez intéressant pour le garder — sur une machine que je contrôle. Non.
+
+Le « tout en local » se lit jusque dans les permissions demandées :
+
+```ts
+permissions: ['bookmarks', 'unlimitedStorage', 'offscreen', 'alarms', 'contextMenus'],
+host_permissions: ['<all_urls>'],
+```
+
+Pas de permission `tabs` (les `host_permissions` suffisent à lire le contenu). Pas de `storage` (IndexedDB seul). Pas de `scripting` (le content script est déclaré statiquement, jamais injecté). Le minimum pour faire le travail, et rien pour surveiller la navigation. Aucune écriture réseau passive : on ne `fetch` une page que sur une action explicite de l'utilisateur. Le seul octet qui transite, une fois pour toutes, ce sont les poids du modèle.
+
+C'est un argument produit autant qu'un principe : sur la fiche du Store, « vos favoris ne quittent jamais votre machine » n'est pas un slogan, c'est une conséquence vérifiable du manifeste.
+
+## Ce que je referais
+
+Le découpage en trois mondes — service worker éphémère, offscreen pour le lourd, IndexedDB pour la mémoire — est la bonne forme pour ce genre d'extension, et je le reprendrais tel quel. RRF est le meilleur rapport qualité/lignes de code que je connaisse pour fusionner des classements hétérogènes : à adopter par défaut avant de toucher à des poids manuels. Et les trois bugs ont le même air de famille — un timer, des workers, une course : à chaque fois, c'est le **cycle de vie** non maîtrisé d'une ressource qui mord. Sur une plateforme où ton propre code peut être tué à tout instant, la moitié du travail consiste à savoir qui meurt quand, et qui le reprend.
+
+Snaaplt est sur le [Chrome Web Store](https://chromewebstore.google.com/detail/snaaplt/nbolgjapmfjjhepadilhnkeadcpahoon), et la présentation vit sur [snaaplt.my-monkey.fr](https://snaaplt.my-monkey.fr). 143 tests pour dormir tranquille — et toujours pas un seul favori qui sort de la machine.
