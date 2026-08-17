@@ -37,11 +37,18 @@ d'autrui. Le serveur renvoie à la place un `can_edit` qu'il a calculé lui-mêm
 | `DATABASE_URL` | `postgresql://blog:…@postgres-prod:5432/blog` (dans `~/secrets/blog-database-url` sur prod-cookie) |
 | `BETTER_AUTH_URL` | `https://blog-api.my-monkey.fr` |
 | `BETTER_AUTH_SECRET` | tiré au sort, jamais commité |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | client OAuth Google propre au blog |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | client OAuth « Blog My-Monkey » (copie dans `~/secrets/blog-google-oauth`) |
 | `PORT` | 3000 par défaut |
 
-L'URI de redirection à déclarer dans la console Google Cloud est
-`https://blog-api.my-monkey.fr/api/auth/callback/google`.
+Le client OAuth vit dans le projet Google Cloud `dailygeo-489414`, sous le nom **Blog My-Monkey**,
+avec deux URI de redirection : `https://blog-api.my-monkey.fr/api/auth/callback/google` et
+`http://localhost:3000/api/auth/callback/google` pour le développement.
+
+Il est **délibérément distinct du client « My-Monkey »** partagé par la galaxie : celui-là sert
+Supabase GoTrue et piloo, et Google n'affiche plus le code secret d'un client existant — s'en
+servir aurait imposé une rotation de secret, donc un risque pour ces applications, pour rien.
+Corollaire : le secret ci-dessus n'est affiché qu'une fois, à la création. S'il est perdu, il faut
+en ajouter un nouveau depuis la console.
 
 ## Développer en local
 

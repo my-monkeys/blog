@@ -456,9 +456,15 @@ articles d'être servis.
 | | |
 |---|---|
 | Domaine | `blog-api.my-monkey.fr` — zone en **Flexible**, donc déclaré `http://` dans Coolify |
+| Application Coolify | `mobj8ptqfrmgdb3q37y2z9fy` (distincte de celle du blog) |
 | Base | `blog` sur `postgres-prod` (PG 17), chaîne dans `~/secrets/blog-database-url` |
 | Schéma | `api/schema.sql`, idempotent |
 | Build | `dockerfile`, répertoire de base `api` |
+| OAuth | client Google **Blog My-Monkey** (projet `dailygeo-489414`), copie dans `~/secrets/blog-google-oauth` |
+
+Le blog ne dépend plus de `auth.my-monkey.fr` : ses comptes lui sont propres. La table
+`blog_comments` a été supprimée du projet Supabase partagé le 2026-08-17, après copie vérifiée
+(archive : `~/archives-supabase/blog_comments-2026-08-17.sql` sur prod-cookie).
 
 ⚠️ **Ne pas mettre `PUBLIC_COMMENTS_API` côté blog en production** : le composant retombe sur
 `https://blog-api.my-monkey.fr` tout seul. La variable n'existe que pour pointer un serveur
