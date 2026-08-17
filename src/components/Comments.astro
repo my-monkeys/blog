@@ -46,6 +46,20 @@
   <div class="comment-list" data-comment-list>
     <p class="comment-loading">Chargement…</p>
   </div>
+
+  <dialog class="login-dialog" data-login-dialog aria-labelledby="login-dialog-titre">
+    <h2 class="login-dialog-titre" id="login-dialog-titre">Se connecter</h2>
+    <p class="login-dialog-corps">
+      Tu peux commenter sans compte : ton navigateur retient le tien pour te laisser le corriger
+      ensuite. Avec un compte, ton nom te suit d'un appareil à l'autre et tes commentaires
+      portent une petite coche.
+    </p>
+    <p class="login-dialog-note">Tu vas être redirigé vers Google, puis ramené à cet article.</p>
+    <div class="login-dialog-actions">
+      <button type="button" class="comment-submit" data-login-google>Continuer avec Google</button>
+      <button type="button" class="comment-cancel-btn" data-login-cancel>Annuler</button>
+    </div>
+  </dialog>
 </section>
 
 <script>
@@ -207,11 +221,13 @@
     const nameInput = document.querySelector<HTMLInputElement>('[name="author_name"]');
     const nameEl = document.querySelector<HTMLElement>('[data-user-name]');
 
-    const [{ data }, connexionDisponible] = await Promise.all([
-      authClient.getSession(),
+    // L'API peut être injoignable : on rend alors la section telle qu'elle est pour un visiteur
+    // sans compte, plutôt que d'interrompre l'initialisation du reste du composant.
+    const [session, connexionDisponible] = await Promise.all([
+      authClient.getSession().catch(() => null),
       loginDisponible(),
     ]);
-    const user = data?.user;
+    const user = session?.data?.user;
 
     if (user) {
       const name = user.name || user.email || 'Utilisateur';
@@ -275,7 +291,20 @@
     const loginBtn = document.querySelector<HTMLButtonElement>('[data-login-btn]');
     const logoutBtn = document.querySelector<HTMLButtonElement>('[data-logout-btn]');
 
-    loginBtn?.addEventListener('click', () => {
+    const dialogue = document.querySelector<HTMLDialogElement>('[data-login-dialog]');
+
+    // Partir chez Google au clic serait brutal au milieu d'un article : on explique d'abord ce
+    // que le compte apporte, et qu'on va sortir du site.
+    loginBtn?.addEventListener('click', () => dialogue?.showModal());
+    dialogue?.querySelector('[data-login-cancel]')?.addEventListener('click', () => dialogue.close());
+
+    // `showModal` place le fond dans le ::backdrop : un clic dessus atteint le <dialog> lui-même,
+    // jamais son contenu, ce qui suffit à distinguer les deux.
+    dialogue?.addEventListener('click', (e) => {
+      if (e.target === dialogue) dialogue.close();
+    });
+
+    dialogue?.querySelector('[data-login-google]')?.addEventListener('click', () => {
       // Google renvoie sur l'API, qui repose ensuite le visiteur sur l'article qu'il lisait.
       authClient.signIn.social({ provider: 'google', callbackURL: window.location.href });
     });
@@ -288,10 +317,12 @@
   }
 
   async function init() {
-    await updateAuthUI();
-    loadComments();
+    // Les gestionnaires d'abord : ils ne dépendent que du DOM. Les poser après les appels réseau
+    // laissait la modale et le formulaire inertes dès que l'API tardait ou refusait de répondre.
     attachForm();
     attachAuth();
+    await updateAuthUI();
+    loadComments();
   }
 
   document.addEventListener('astro:page-load', init);
@@ -449,6 +480,55 @@
     opacity: 0.4;
     cursor: not-allowed;
     box-shadow: none;
+  }
+
+  /* Modale de connexion — mêmes bords francs et même ombre dure que la lightbox */
+  .login-dialog {
+    /* Le centrage par défaut d'un <dialog> ne survit pas à une largeur contrainte : sans ce
+       inset + margin auto, la boîte se colle en haut à gauche. Même recette que la lightbox. */
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(92vw, 30rem);
+    height: fit-content;
+    max-height: 90vh;
+    overflow: auto;
+    padding: 2rem;
+    border: 3px solid var(--ink);
+    background: var(--bg);
+    color: var(--ink);
+    box-shadow: var(--shadow-hard);
+  }
+  .login-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.85);
+  }
+  .login-dialog-titre {
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 0.875rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin: 0 0 1rem;
+  }
+  .login-dialog-corps {
+    font-family: var(--font-body);
+    font-size: 1rem;
+    line-height: 1.6;
+    margin: 0 0 0.75rem;
+  }
+  .login-dialog-note {
+    font-family: var(--font-ui);
+    font-size: 0.75rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-soft);
+    margin: 0 0 1.75rem;
+  }
+  .login-dialog-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
   }
 
   .comment-edit-actions {
