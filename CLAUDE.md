@@ -30,6 +30,7 @@ src/
   lib/readingTime.ts
 public/admin/                   # Decap CMS (index.html + config.yml)
 oauth/                          # Cloudflare Worker OAuth (deploy séparé)
+api/                            # Express + PostgreSQL : commentaires + comptes (deploy séparé)
 .github/workflows/
   build-and-release.yml         # build + gh release sur push main
 ```
@@ -345,11 +346,21 @@ $$
 
 ### 7. Commentaires
 
-Section `<Comments />` ajoutée automatiquement à la fin de chaque post via `PostLayout`. Backed par **Giscus** + GitHub Discussions sur `my-monkeys/blog` (catégorie "General"). Mapping par pathname → 1 thread par post.
+Section `<Comments />` ajoutée automatiquement à la fin de chaque post via `PostLayout`. Système
+maison, servi par **`api/`** — un service Express + PostgreSQL déployé à part (cf. la section
+« Le service `api/` » plus bas). Ni Giscus, ni GitHub Discussions : cette doc l'a décrit
+longtemps après que le composant eut changé.
 
-**Setup requis** (one-shot, à faire si pas encore) : installer le GitHub App Giscus sur le repo → https://github.com/apps/giscus → "Only select repositories" → cocher `my-monkeys/blog`. Sans ça, l'iframe s'affiche mais le post ne marche pas.
+Deux façons de commenter, et elles coexistent :
 
-Theme dark/light suit automatiquement le `data-theme` du blog (postMessage à l'iframe au toggle).
+- **sans compte** — un `session_token` (uuid) tiré par le navigateur et gardé en localStorage,
+  envoyé en en-tête `x-session-token`. C'est ce qui permet de corriger son commentaire ;
+- **avec un compte** — connexion Google via Better Auth. Le nom est alors verrouillé dans le
+  formulaire et un ✓ s'affiche à côté. La session survit au vidage du localStorage.
+
+Le droit de modifier n'est pas déduit côté navigateur : le serveur renvoie un `can_edit` par
+commentaire. Ne jamais rétablir un `select *` ici — `session_token` est un secret porteur, et
+l'exposer rendrait tous les commentaires modifiables par n'importe qui.
 
 ### 5. Ajouter des images
 
@@ -430,9 +441,38 @@ git push
 
 Marche dès que le setup Worker OAuth est fait (cf. "Setup one-shot" ci-dessous). UI web sur `https://blog.my-monkey.fr/admin/` → login GitHub → écris → publish → Decap commit pour toi → même pipeline.
 
+## Le service `api/`
+
+Express + PostgreSQL, **déployé à part du blog**, comme `oauth/`. Il sert les commentaires et
+porte les comptes (Better Auth, Google). Son propre `README.md` détaille les routes, les
+variables et le développement local.
+
+**Pourquoi à part** : le blog est statique (`is_static` chez Coolify, servi en fichiers par
+nginx) — il n'a aucun serveur où poser une route. Tant qu'il parlait à Supabase, le navigateur
+attaquait PostgREST en direct ; en sortir imposait un point d'entrée quelque part. Le garder
+hors du blog laisse le déploiement du blog inchangé, et un incident sur l'API n'empêche pas les
+articles d'être servis.
+
+| | |
+|---|---|
+| Domaine | `blog-api.my-monkey.fr` — zone en **Flexible**, donc déclaré `http://` dans Coolify |
+| Base | `blog` sur `postgres-prod` (PG 17), chaîne dans `~/secrets/blog-database-url` |
+| Schéma | `api/schema.sql`, idempotent |
+| Build | `dockerfile`, répertoire de base `api` |
+
+⚠️ **Ne pas mettre `PUBLIC_COMMENTS_API` côté blog en production** : le composant retombe sur
+`https://blog-api.my-monkey.fr` tout seul. La variable n'existe que pour pointer un serveur
+local en développement.
+
 ## Déploiement
 
-Via le pipeline **monkey** (cf. `../CLAUDE.md`). Particularité : ici le build et la `gh release` sont **automatisés** par `build-and-release.yml` (déclenché par push sur `main`). On ne build/release pas manuellement, à la différence de `landing-page`.
+Un `git push` suffit : Coolify construit et publie (cf. `../CLAUDE.md`, section `prod-cookie`).
+Le blog et son `api/` sont **deux applications Coolify sur le même dépôt** — un push redéploie
+celle dont les fichiers ont changé.
+
+⚠️ Cette section a longtemps décrit le pipeline **monkey** + `gh release` vers O2switch, qui
+n'est plus la cible depuis août 2026. Le workflow `build-and-release.yml` subsiste dans
+`.github/workflows/` mais ne conditionne plus la mise en ligne.
 
 ### Setup one-shot
 
@@ -459,16 +499,16 @@ Voir `../CLAUDE.md` (clean code, pas d'abstractions prématurées, pas de commen
 
 Deux URLs pour la même API admin (Bearer token `ADMIN_API_TOKEN`), à choisir selon ton accès réseau :
 - **Public (depuis Internet, pour tout le monde)** : `https://git.my-monkey.fr/api/admin/deploys`
-- **Tailscale (sur le tailnet cookie-server)** : `http://monkey.cookie/api/admin/deploys`
+- **Tailscale (sur le tailnet dev-cookie)** : `http://monkey.cookie/api/admin/deploys`
 
 Filtre `?repo=<org/repo>&limit=1`, tri par date desc → la ligne `[0]` est le dernier deploy.
 
 ```bash
 # Token admin monkey — deux cas :
-#  • Tailscale + accès SSH à cookie-server → récupération auto ci-dessous
+#  • Tailscale + accès SSH à dev-cookie → récupération auto ci-dessous
 #  • sinon → exporte d'abord  MONKEY_ADMIN_TOKEN=<token admin monkey>
 TOKEN="${MONKEY_ADMIN_TOKEN}"
-[ -z "$TOKEN" ] && TOKEN=$(ssh cookie-server.tailscale "grep '^ADMIN_API_TOKEN=' /home/maxim/monkey/infra/.env.production | cut -d= -f2-")
+[ -z "$TOKEN" ] && TOKEN=$(ssh dev-cookie "grep '^ADMIN_API_TOKEN=' /home/maxim/monkey/infra/.env.production | cut -d= -f2-")
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)   # ex: my-monkeys/<repo>
 TAG="vX.Y.Z"   # le tag qu'on vient de publier
 
