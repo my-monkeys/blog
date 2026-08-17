@@ -1,7 +1,8 @@
 ---
-// Comments — Supabase-backed, two auth modes:
-// 1. Anonymous: session_token (uuid) stored in localStorage → edit/delete own comments
-// 2. SSO My-Monkey: shared Supabase cookie on .my-monkey.fr → edit/delete via user_id
+// Commentaires — servis par l'API du blog (`api/`), deux façons d'être propriétaire :
+// 1. Anonyme : un `session_token` (uuid) gardé en localStorage et envoyé en en-tête
+// 2. Compte : session Better Auth (Google), cookie posé par l'API
+// Le droit de modifier n'est plus déduit ici : le serveur renvoie `can_edit` par commentaire.
 ---
 
 <section class="comments" aria-label="Commentaires">
@@ -48,22 +49,29 @@
 </section>
 
 <script>
-  import { createBrowserClient } from '@supabase/ssr';
+  import { createAuthClient } from 'better-auth/client';
 
-  const SUPABASE_URL = 'https://klliwmgdyuatstjvzzbb.supabase.co';
-  const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsbGl3bWdkeXVhdHN0anZ6emJiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI4MDI4MTAsImV4cCI6MjA4ODM3ODgxMH0.6qmXdDdToqZvqvaOXm8d-0r5rK6a-QCad2o1IRZe0KM';
-  const TABLE = 'blog_comments';
+  // Surchargeable en dev (`PUBLIC_COMMENTS_API=http://localhost:3000`) ; en production l'URL
+  // est stable et publique, elle n'a pas besoin de traverser la configuration de Coolify.
+  const API = import.meta.env.PUBLIC_COMMENTS_API ?? 'https://blog-api.my-monkey.fr';
   const TOKEN_KEY = 'blog_comment_token';
   const NAME_KEY = 'blog_comment_name';
 
-  const supabase = createBrowserClient(SUPABASE_URL, SUPABASE_KEY, {
-    cookieOptions: {
-      domain: '.my-monkey.fr',
-      path: '/',
-      sameSite: 'lax' as const,
-      secure: location.protocol === 'https:',
-    },
-  });
+  const authClient = createAuthClient({ baseURL: API });
+
+  // Le cookie de session vit sur le sous-domaine de l'API : `credentials: 'include'` est ce qui
+  // le fait voyager, `blog.` et `blog-api.` étant sur le même site aux yeux du navigateur.
+  async function appelAPI(chemin: string, options: RequestInit = {}) {
+    return fetch(`${API}${chemin}`, {
+      ...options,
+      credentials: 'include',
+      headers: {
+        'x-session-token': getSessionToken(),
+        ...(options.body ? { 'content-type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    });
+  }
 
   function getSlug() {
     return window.location.pathname.replace(/\/+$/, '').split('/').pop() || '';
@@ -95,21 +103,14 @@
 
   interface Comment {
     id: string;
-    post_slug: string;
     author_name: string;
     message: string;
-    session_token: string;
-    user_id: string | null;
     created_at: string;
+    verified: boolean;
+    can_edit: boolean;
   }
 
   let currentUser: { id: string; name: string } | null = null;
-
-  function canEdit(c: Comment): boolean {
-    if (currentUser && c.user_id === currentUser.id) return true;
-    if (c.session_token === getSessionToken()) return true;
-    return false;
-  }
 
   function renderComments(comments: Comment[], listEl: HTMLElement) {
     if (!comments.length) {
@@ -119,9 +120,9 @@
     listEl.innerHTML = comments.map((c) =>
       `<div class="comment" data-id="${c.id}">
         <div class="comment-header">
-          <span class="comment-author">${escapeHTML(c.author_name)}${c.user_id ? ' <span class="comment-verified" title="Compte My-Monkey">✓</span>' : ''}</span>
+          <span class="comment-author">${escapeHTML(c.author_name)}${c.verified ? ' <span class="comment-verified" title="Compte vérifié">✓</span>' : ''}</span>
           <span class="comment-date">${timeAgo(c.created_at)}</span>
-          ${canEdit(c) ? `<div class="comment-actions">
+          ${c.can_edit ? `<div class="comment-actions">
             <button type="button" class="comment-action-btn" data-edit="${c.id}" title="Modifier">✎</button>
             <button type="button" class="comment-action-btn comment-action-delete" data-delete="${c.id}" title="Supprimer">✕</button>
           </div>` : ''}
@@ -161,39 +162,31 @@
   async function saveEdit(id: string, message: string) {
     const trimmed = message.trim();
     if (!trimmed) return;
-    const { error } = await supabase
-      .from(TABLE)
-      .update({ message: trimmed })
-      .eq('id', id)
-      .headers({ 'x-session-token': getSessionToken() });
-    if (error) console.error('update failed:', error);
+    const res = await appelAPI(`/comments/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ message: trimmed }),
+    });
+    if (!res.ok) console.error('modification refusée:', res.status);
     loadComments();
   }
 
   async function deleteComment(id: string) {
     if (!confirm('Supprimer ce commentaire ?')) return;
-    const { error } = await supabase
-      .from(TABLE)
-      .delete()
-      .eq('id', id)
-      .headers({ 'x-session-token': getSessionToken() });
-    if (error) console.error('delete failed:', error);
+    const res = await appelAPI(`/comments/${id}`, { method: 'DELETE' });
+    if (!res.ok) console.error('suppression refusée:', res.status);
     loadComments();
   }
 
   async function loadComments() {
     const listEl = document.querySelector<HTMLElement>('[data-comment-list]');
     if (!listEl) return;
-    const { data, error } = await supabase
-      .from(TABLE)
-      .select('*')
-      .eq('post_slug', getSlug())
-      .order('created_at', { ascending: true });
-    if (error) {
+    try {
+      const res = await appelAPI(`/comments?slug=${encodeURIComponent(getSlug())}`);
+      if (!res.ok) throw new Error(String(res.status));
+      renderComments((await res.json()) as Comment[], listEl);
+    } catch {
       listEl.innerHTML = '<p class="comment-empty">Impossible de charger les commentaires.</p>';
-      return;
     }
-    renderComments(data as Comment[], listEl);
   }
 
   async function updateAuthUI() {
@@ -203,10 +196,11 @@
     const nameInput = document.querySelector<HTMLInputElement>('[name="author_name"]');
     const nameEl = document.querySelector<HTMLElement>('[data-user-name]');
 
-    const { data: { user } } = await supabase.auth.getUser();
+    const { data } = await authClient.getSession();
+    const user = data?.user;
 
     if (user) {
-      const name = user.user_metadata?.full_name || user.user_metadata?.name || user.email || 'Utilisateur';
+      const name = user.name || user.email || 'Utilisateur';
       currentUser = { id: user.id, name };
       if (loginBtn) loginBtn.hidden = true;
       if (userEl) userEl.hidden = false;
@@ -247,20 +241,16 @@
 
       if (!currentUser) localStorage.setItem(NAME_KEY, name);
 
-      const row: Record<string, unknown> = {
-        post_slug: getSlug(),
-        author_name: name,
-        message: msg,
-        session_token: getSessionToken(),
-      };
-      if (currentUser) row.user_id = currentUser.id;
-
-      const { error } = await supabase.from(TABLE).insert(row);
-      if (error) {
-        errorEl.textContent = 'Erreur : ' + (error.message || 'réessaie.');
-      } else {
+      const res = await appelAPI('/comments', {
+        method: 'POST',
+        body: JSON.stringify({ post_slug: getSlug(), author_name: name, message: msg }),
+      });
+      if (res.ok) {
         msgInput.value = '';
         loadComments();
+      } else {
+        const { error } = await res.json().catch(() => ({ error: '' }));
+        errorEl.textContent = 'Erreur : ' + (error || 'réessaie.');
       }
       btn.disabled = false;
       btn.textContent = 'Envoyer';
@@ -272,13 +262,13 @@
     const logoutBtn = document.querySelector<HTMLButtonElement>('[data-logout-btn]');
 
     loginBtn?.addEventListener('click', () => {
-      const redirectTo = window.location.href;
-      window.location.href = `https://auth.my-monkey.fr/login?redirect=${encodeURIComponent(redirectTo)}`;
+      // Google renvoie sur l'API, qui repose ensuite le visiteur sur l'article qu'il lisait.
+      authClient.signIn.social({ provider: 'google', callbackURL: window.location.href });
     });
 
     logoutBtn?.addEventListener('click', async () => {
-      await supabase.auth.signOut();
-      updateAuthUI();
+      await authClient.signOut();
+      await updateAuthUI();
       loadComments();
     });
   }
