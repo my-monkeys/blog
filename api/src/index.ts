@@ -35,6 +35,13 @@ app.use(express.json({ limit: '32kb' }));
 app.use(['/comments'], (req, res, next) => (req.method === 'GET' ? next() : limiteEcritures(req, res, next)));
 app.use(commentaires);
 
+// Ce que le blog a besoin de savoir avant d'afficher son en-tête. Sans client OAuth déclaré,
+// Better Auth répond 500 à la moindre tentative : mieux vaut que le bouton « Se connecter »
+// n'apparaisse pas du tout, et qu'il réapparaisse de lui-même le jour où la variable est posée.
+app.get('/config', (_req, res) => {
+  res.json({ login: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) });
+});
+
 app.get('/health', async (_req, res) => {
   try {
     await pool.query('select 1');

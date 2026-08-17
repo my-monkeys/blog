@@ -189,6 +189,17 @@
     }
   }
 
+  // Tant qu'aucun client OAuth n'est déclaré côté API, proposer « Se connecter » mènerait à une
+  // erreur : le bouton reste caché, et réapparaît de lui-même dès que l'API l'annonce.
+  async function loginDisponible(): Promise<boolean> {
+    try {
+      const res = await appelAPI('/config');
+      return res.ok && (await res.json()).login === true;
+    } catch {
+      return false;
+    }
+  }
+
   async function updateAuthUI() {
     const authContainer = document.querySelector<HTMLElement>('[data-comment-auth]');
     const loginBtn = document.querySelector<HTMLElement>('[data-login-btn]');
@@ -196,7 +207,10 @@
     const nameInput = document.querySelector<HTMLInputElement>('[name="author_name"]');
     const nameEl = document.querySelector<HTMLElement>('[data-user-name]');
 
-    const { data } = await authClient.getSession();
+    const [{ data }, connexionDisponible] = await Promise.all([
+      authClient.getSession(),
+      loginDisponible(),
+    ]);
     const user = data?.user;
 
     if (user) {
@@ -208,7 +222,7 @@
       if (nameEl) nameEl.textContent = name;
     } else {
       currentUser = null;
-      if (loginBtn) loginBtn.hidden = false;
+      if (loginBtn) loginBtn.hidden = !connexionDisponible;
       if (userEl) userEl.hidden = true;
       if (nameInput) {
         nameInput.readOnly = false;
